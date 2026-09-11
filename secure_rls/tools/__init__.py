@@ -87,7 +87,12 @@ class StatsArgs(ToolArgs):
         default=None, description="Only performance scores <= this."
     )
     hired_from: str | None = Field(
-        default=None, description="Only employees hired on or after this ISO date."
+        default=None,
+        description=(
+            "Only employees hired on or after this ISO date. For a single year "
+            "set both ends, e.g. hired_from='2020-01-01' and hired_to='2020-12-31' "
+            "-- hired_from alone means 'ever since', not 'during'."
+        ),
     )
     hired_to: str | None = Field(
         default=None, description="Only employees hired on or before this ISO date."
@@ -97,8 +102,8 @@ class StatsArgs(ToolArgs):
         description=(
             "Alternative filter form: {column: {comparison: value}}, e.g. "
             "{'performance_score': {'gte': 4.5}} or {'hire_date': {'lt': '2018-01-01'}}. "
-            "Columns: salary, performance_score, hire_date. Comparisons: "
-            "min/gte, max/lte, gt, lt, eq."
+            "Columns: salary, performance_score, hire_date, department. "
+            "Comparisons: min/gte, max/lte, gt, lt, eq (department takes eq only)."
         ),
     )
 

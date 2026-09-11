@@ -42,7 +42,13 @@ _PANDAS_METRIC = {
 }
 
 
-FILTERABLE: Final[frozenset[str]] = frozenset({"salary", "performance_score", "hire_date"})
+#: Columns the nested filter may name. `department` belongs here as much as the
+#: numeric ones: leaving it out made the tool inconsistent with its own flat
+#: `department` argument, and the model -- having been refused for naming it --
+#: retried with something else and answered wrongly.
+FILTERABLE: Final[frozenset[str]] = frozenset(
+    {"salary", "performance_score", "hire_date", "department"}
+)
 
 #: Comparison keywords accepted in a nested filter, mapped to what they mean.
 #: Models do not agree on this vocabulary -- one writes ``min``, another
@@ -71,6 +77,10 @@ class Predicate:
 
     def apply(self, frame: pd.DataFrame) -> pd.DataFrame:
         series = frame[self.column]
+        if self.column == "department":
+            # Departments are names, not quantities: only equality makes sense,
+            # and users do not capitalise consistently.
+            return frame[series.str.lower() == str(self.value).strip().lower()]
         if self.column == "hire_date":
             series = series.astype(str)
             value: object = str(self.value)
@@ -113,6 +123,11 @@ def parse_filter(raw: dict[str, object] | None) -> tuple[Predicate, ...]:
         if isinstance(condition, dict):
             for operator, value in condition.items():
                 symbol = OPERATORS.get(str(operator).lower().strip())
+                if column == "department" and symbol not in (None, "=="):
+                    raise ColumnError(
+                        "department can only be compared for equality, "
+                        f"not {operator!r}"
+                    )
                 if symbol is None:
                     raise ColumnError(
                         f"unknown comparison {operator!r}; use one of "

@@ -5,4 +5,3 @@ pytest-cov>=6.0
 hypothesis>=6.120
 ruff>=0.8
 mypy>=1.13
-types-passlib

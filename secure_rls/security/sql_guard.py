@@ -21,6 +21,7 @@ AST* and rendered back out, so it cannot be commented out or escaped from.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from typing import Final
 
@@ -181,29 +182,50 @@ def _check_tables(statement: exp.Expression, cte_names: frozenset[str], sql: str
 #: Their operands are still walked and checked.
 _SYNTAX_NODES: Final[tuple[type[exp.Expression], ...]] = tuple(
     node
-    for node in (getattr(exp, attr, None) for attr in ("Case", "Cast", "Distinct", "Extract"))
+    for node in (
+        getattr(exp, attr, None)
+        for attr in ("Case", "Cast", "Distinct", "Extract", "Exists")
+    )
     if isinstance(node, type)
 )
 
+#: A real function call always renders as ``NAME(...)`` with a bare identifier
+#: in front of the parenthesis. Anything else that reaches here is an operator
+#: or a connective, not a call.
+_CALLABLE_NAME: Final = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
 
 def _function_name(node: exp.Func) -> str:
-    """The name SQLite will actually see.
+    """The name SQLite will actually see, or "" if this is not a call at all.
+
+    Two traps here, both found by testing rather than by reading the docs.
 
     sqlglot canonicalises function nodes on parse -- ``strftime`` becomes a
-    ``TimeToStr`` node, for instance -- so the class name is the wrong thing to
-    match on. Rendering the node back into the SQLite dialect and taking the
-    leading identifier gives the name the authorizer (L3) will be asked about,
-    which keeps the two layers checking the same thing.
+    ``TimeToStr`` node -- so the class name is the wrong thing to match on. The
+    rendered SQLite form gives the name the authorizer (L3) will be asked
+    about, which keeps the two layers checking the same thing.
+
+    But ``exp.Func`` is also the base class of the boolean connectives: ``AND``
+    is an ``exp.And``, which is an ``exp.Func``. Taking the text before the
+    first parenthesis therefore read ``a = 1 AND (b = 2)`` as a call to a
+    function named "a = 1 and", and refused ordinary queries. Hence the
+    identifier check: a genuine call has a bare name in front of the bracket,
+    and nothing else does. Skipping a connective is safe -- the walk still
+    descends into its operands, so a hostile function nested inside an ``AND``
+    is still caught.
     """
-    rendered = node.sql(dialect=DIALECT)
-    if "(" not in rendered:
-        # Not a call site: either a bare keyword such as CURRENT_DATE, or one of
-        # the transparent wrapper nodes sqlglot inserts while canonicalising
-        # (parsing `strftime(...)` yields a TsOrDsToTimestamp around the column,
-        # which renders as just the column name). SQLite's authorizer is the
-        # backstop for anything that really is a function at runtime.
+    if isinstance(node, exp.Anonymous):
+        return node.name.lower()
+
+    head, bracket, _ = node.sql(dialect=DIALECT).partition("(")
+    if not bracket:
+        # A bare keyword such as CURRENT_DATE, or one of the transparent
+        # wrapper nodes sqlglot inserts while canonicalising.
         return ""
-    return rendered.split("(", 1)[0].strip().lower()
+    head = head.strip()
+    if not _CALLABLE_NAME.match(head):
+        return ""
+    return head.lower()
 
 
 def _check_functions(statement: exp.Expression, sql: str) -> None:

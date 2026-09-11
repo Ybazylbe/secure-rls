@@ -27,7 +27,10 @@ import sqlite3
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Final
+from typing import TYPE_CHECKING, Final
+
+if TYPE_CHECKING:
+    import pandas as pd
 
 from secure_rls.security.authorizer import make_authorizer
 from secure_rls.security.context import SecurityContext
@@ -174,3 +177,20 @@ def row_count(ctx: SecurityContext, db_path: Path | str = DEFAULT_DB_PATH) -> in
             con.execute(f"SELECT count(*) FROM {TENANT_VIEW}")  # noqa: S608 - constant
             .fetchone()[0]
         )
+
+
+def tenant_frame(
+    ctx: SecurityContext, db_path: Path | str = DEFAULT_DB_PATH
+) -> pd.DataFrame:
+    """The caller's slice as a DataFrame, for the pandas-based tools.
+
+    Rows are fetched through the guarded connection and handed to pandas
+    afterwards, rather than letting pandas talk to SQLite itself: the
+    authorizer refuses the introspection some drivers perform, and this keeps
+    a single, auditable path to the data.
+    """
+    import pandas as pd
+
+    with tenant_connection(ctx, db_path) as con:
+        rows = con.execute(f"SELECT * FROM {TENANT_VIEW}").fetchall()  # noqa: S608 - constant
+    return pd.DataFrame([dict(r) for r in rows], columns=list(COLUMNS))

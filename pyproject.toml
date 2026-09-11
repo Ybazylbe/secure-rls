@@ -2,6 +2,9 @@
 pythonpath = ["."]
 testpaths = ["tests"]
 addopts = "-q"
+# The retrieval tests load a sentence-transformer; deselect with -m "not slow"
+# when you want the fast security suite only.
+markers = ["slow: needs the embedding model"]
 
 [tool.ruff]
 line-length = 100

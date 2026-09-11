@@ -162,3 +162,76 @@ def test_each_tenant_gets_its_own_index(db_path: Path) -> None:
             assert len(index) > 0
     finally:
         reset_indexes()
+
+
+# --------------------------------------------------------------------------
+# Filters: the shape models actually send
+# --------------------------------------------------------------------------
+
+
+def test_flat_and_nested_filters_mean_the_same_thing(db_path: Path, audit: AuditLog) -> None:
+    """The nested form exists because models emit it; it must not be a second,
+    subtly different code path."""
+    from secure_rls.tools.stats import Filters
+
+    ctx = ctx_for("acme")
+    flat = aggregate(
+        "count", None, ctx, audit,
+        filters=Filters.build(min_performance=4.5), db_path=db_path,
+    )
+    nested = aggregate(
+        "count", None, ctx, audit,
+        filters=Filters.build(nested={"performance_score": {"gte": 4.5}}), db_path=db_path,
+    )
+    assert flat.rows == nested.rows
+
+
+@pytest.mark.parametrize(
+    ("spelling", "symbol"),
+    [("min", ">="), ("gte", ">="), ("max", "<="), ("lte", "<="), ("gt", ">"), ("lt", "<")],
+)
+def test_comparison_spellings_models_use_are_accepted(spelling: str, symbol: str) -> None:
+    from secure_rls.tools.stats import parse_filter
+
+    predicates = parse_filter({"salary": {spelling: 100_000}})
+    assert predicates[0].operator == symbol
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        {"ssn": {"gte": 1}},
+        {"notes": {"eq": "x"}},
+        {"salary": {"regex": "1"}},
+    ],
+)
+def test_filters_outside_the_vocabulary_are_refused(bad: dict[str, object]) -> None:
+    from secure_rls.tools.frames import ColumnError
+    from secure_rls.tools.stats import parse_filter
+
+    with pytest.raises(ColumnError):
+        parse_filter(bad)
+
+
+def test_an_unfiltered_result_says_so_in_words(db_path: Path, audit: AuditLog) -> None:
+    """The agent once reported a total as a filtered count; the summary the
+    model reads now states plainly that nothing was filtered."""
+    result = aggregate("count", None, ctx_for("acme"), audit, db_path=db_path)
+    assert "no filter applied" in result.summary.lower()
+
+
+def test_unknown_tool_arguments_are_rejected_not_ignored(audit: AuditLog) -> None:
+    """Silently dropping an unrecognised argument runs a different query than
+    the one that was asked for, and returns a real number for it."""
+    from pydantic import ValidationError
+
+    stats_tool = next(t for t in build_tools(ctx_for("acme"), audit) if t.name == "stats")
+    with pytest.raises(ValidationError):
+        stats_tool.args_schema(metric="count", nonsense={"a": 1})
+
+
+def test_min_and_max_report_who(db_path: Path, audit: AuditLog) -> None:
+    """"Who earns the most" is a max question with a name attached."""
+    result = aggregate("max", "salary", ctx_for("acme"), audit, db_path=db_path)
+    assert "name" in result.rows[0]
+    assert result.rows[0]["name"]

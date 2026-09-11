@@ -1,3 +1,3 @@
-from secure_rls.security.context import SecurityContext, TENANTS
+from secure_rls.security.context import TENANTS, SecurityContext
 
 __all__ = ["SecurityContext", "TENANTS"]

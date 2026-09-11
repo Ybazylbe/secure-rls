@@ -10,7 +10,14 @@ target-version = "py310"
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM", "S"]
 # S101: pytest relies on bare asserts.
-per-file-ignores = { "tests/*" = ["S101"], "evals/*" = ["S101"] }
+# S608: the security tests build hostile SQL from module constants on purpose --
+#       constructing those statements *is* the test.
+# SIM117: nested `with` blocks keep two tenant sessions visibly open at once,
+#       which is the point of the cross-session tests.
+# S311: the dataset generator wants a *seeded, reproducible* PRNG. Using a
+#       cryptographic source there would break the deterministic fixtures
+#       the evaluation suite depends on.
+per-file-ignores = { "tests/*" = ["S101", "S608", "SIM117"], "evals/*" = ["S101", "S608"], "scripts/gen_data.py" = ["S311"] }
 
 [tool.mypy]
 python_version = "3.10"

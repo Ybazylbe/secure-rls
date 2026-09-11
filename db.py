@@ -95,7 +95,9 @@ def init_db(
 
     with admin_connection(db_path) as con:
         con.executescript(_SCHEMA)
-        existing = con.execute(f"SELECT count(*) FROM {BASE_TABLE}").fetchone()[0]
+        existing = con.execute(
+            f"SELECT count(*) FROM {BASE_TABLE}"  # noqa: S608 - constant identifier
+        ).fetchone()[0]
         if existing and not rebuild:
             return int(existing)
 
@@ -109,7 +111,7 @@ def init_db(
                 for r in csv.DictReader(fh)
             ]
         con.executemany(
-            f"INSERT OR REPLACE INTO {BASE_TABLE} "
+            f"INSERT OR REPLACE INTO {BASE_TABLE} "  # noqa: S608 - constant identifiers
             f"({', '.join(COLUMNS)}) VALUES ({', '.join('?' * len(COLUMNS))})",
             rows,
         )
@@ -134,8 +136,13 @@ def tenant_connection(
     con = sqlite3.connect(f"file:{Path(db_path)}?mode=ro", uri=True)
     con.row_factory = sqlite3.Row
     try:
+        # noqa justified: the identifiers are module constants and ctx.tenant_id
+        # was validated against the closed TENANTS allowlist in SecurityContext.
+        # A view body cannot take bound parameters, so the literal is unavoidable;
+        # the allowlist is what makes it safe, and tests/test_isolation.py pins
+        # that behaviour for quoting and injection payloads.
         con.execute(
-            f"CREATE TEMP VIEW {TENANT_VIEW} AS "
+            f"CREATE TEMP VIEW {TENANT_VIEW} AS "  # noqa: S608 - see comment above
             f"SELECT {', '.join(COLUMNS)} FROM {BASE_TABLE} "
             f"WHERE tenant_id = '{ctx.tenant_id}'"
         )
@@ -154,4 +161,7 @@ def tenant_connection(
 def row_count(ctx: SecurityContext, db_path: Path | str = DEFAULT_DB_PATH) -> int:
     """Rows visible to ``ctx``. Convenience for the UI header and tests."""
     with tenant_connection(ctx, db_path) as con:
-        return int(con.execute(f"SELECT count(*) FROM {TENANT_VIEW}").fetchone()[0])
+        return int(
+            con.execute(f"SELECT count(*) FROM {TENANT_VIEW}")  # noqa: S608 - constant
+            .fetchone()[0]
+        )

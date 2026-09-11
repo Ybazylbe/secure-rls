@@ -124,6 +124,8 @@ def _weighted_keys(mapping: dict[str, tuple[float, ...]]) -> tuple[list[str], li
 
 def _performance(rng: random.Random) -> float:
     """Scores cluster around 3.6 with a light left tail, as real reviews do."""
+    # S311: `random` is the right tool here -- this is reproducible test data,
+    # seeded on purpose, not key material.
     score = rng.gauss(3.6, 0.55)
     return round(min(5.0, max(1.0, score)), 1)
 

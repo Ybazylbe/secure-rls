@@ -31,7 +31,9 @@ _ALLOWED_ACTIONS: Final[frozenset[int]] = frozenset(
 
 #: SQL functions the agent may call. Default-deny: anything not listed here is
 #: refused, which rules out extension loading and file I/O by construction.
-_ALLOWED_FUNCTIONS: Final[frozenset[str]] = frozenset(
+#: The SQL guard (L4) imports this same set, so the two layers cannot drift
+#: apart and disagree about what is callable.
+ALLOWED_FUNCTIONS: Final[frozenset[str]] = frozenset(
     {
         # aggregates
         "avg", "count", "group_concat", "max", "min", "sum", "total",
@@ -100,7 +102,7 @@ def make_authorizer(
 
         if action == sqlite3.SQLITE_FUNCTION:
             name = (arg2 or "").lower()
-            if name in _ALLOWED_FUNCTIONS:
+            if name in ALLOWED_FUNCTIONS:
                 return sqlite3.SQLITE_OK
             return deny(f"call to non-allowlisted function {name!r}")
 

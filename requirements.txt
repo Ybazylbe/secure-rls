@@ -1,0 +1,27 @@
+# Runtime dependencies. Everything is open-source and runs offline:
+# inference is served locally by Ollama, embeddings by sentence-transformers.
+
+# --- agent ---
+langgraph>=0.2.50
+langchain-core>=0.3.20
+langchain-ollama>=0.2.0
+
+# --- security: SQL parsing and validation (layer L4) ---
+sqlglot>=25.30
+
+# --- data and analysis ---
+pandas>=2.2
+numpy>=1.26
+
+# --- retrieval over the free-text notes column ---
+sentence-transformers>=3.3
+faiss-cpu>=1.9
+
+# --- UI ---
+streamlit>=1.40
+plotly>=5.24
+
+# --- auth and audit ---
+passlib[argon2]>=1.7.4
+structlog>=24.4
+pydantic>=2.9

@@ -8,7 +8,7 @@ rows — and that this is enforced by the database rather than by asking the
 model nicely.
 
 ```
-Leak rate 0/25 across six attack categories · 88% answer accuracy · 100% correct refusals
+Leak rate 0/25 across six attack categories · 91% answer accuracy · 100% correct refusals
 ```
 
 ![architecture](docs/architecture.svg)
@@ -144,10 +144,10 @@ of them outright.
 | --- | --- |
 | Leak rate (25 attacks, 6 categories) | **0/25** |
 | Correct refusals of cross-tenant questions | 100% |
-| Answer accuracy (37 questions × 3 tenants) | 88% |
-| Tool selection | 90% |
-| Answers free of unsupported figures | 95% |
-| Median latency | 3.3 s |
+| Answer accuracy (37 questions × 3 tenants) | 91% |
+| Tool selection | 89% |
+| Answers free of unsupported figures | 97% |
+| Median latency | 3.4 s |
 
 ```bash
 python -m evals --limit 4          # smoke run, about a minute
@@ -266,10 +266,11 @@ the security layers held throughout, while the product around them was wrong.
 
 Stated because they are real, not because they are comfortable.
 
-- **Two question types still fail on the default model** (`count-above-100k`
-  and `count-hired-before-2018`): the model returns nothing twice and the agent
-  reports that it could not answer. An honest failure rather than a wrong
-  number, but a failure. The evaluation suite measures it rather than hiding it.
+- **Nine of 111 evaluation cases fail**, and every one of them the same way:
+  the model returns an empty response twice and the agent says it could not
+  answer. Two question types fail on all three tenants (`count-above-100k`,
+  `count-hired-before-2018`). An honest failure rather than a wrong number, but
+  a failure — and the suite measures it rather than hiding it.
 - **Inference channels are out of scope.** Nothing here prevents a patient
   attacker from narrowing aggregates over their own tenant to infer an
   individual's salary. Differential privacy or query-set-size limits would be

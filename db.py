@@ -75,11 +75,20 @@ TABLE employees (
 )"""
 
 
-def admin_connection(db_path: Path | str = DEFAULT_DB_PATH) -> sqlite3.Connection:
-    """Unrestricted connection. Loading, tests and eval ground truth only."""
+@contextmanager
+def admin_connection(db_path: Path | str = DEFAULT_DB_PATH) -> Iterator[sqlite3.Connection]:
+    """Unrestricted connection. Loading, tests and eval ground truth only.
+
+    A context manager rather than a bare factory: ``with sqlite3.connect(...)``
+    commits the transaction but does *not* close the handle, so every caller
+    that looked like it was cleaning up was in fact leaking one.
+    """
     con = sqlite3.connect(str(db_path))
     con.row_factory = sqlite3.Row
-    return con
+    try:
+        yield con
+    finally:
+        con.close()
 
 
 def init_db(

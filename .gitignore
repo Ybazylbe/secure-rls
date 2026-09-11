@@ -10,3 +10,4 @@ venv/
 .DS_Store
 .streamlit/secrets.toml
 evals/results/
+audit.log

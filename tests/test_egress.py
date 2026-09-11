@@ -15,8 +15,8 @@ from secure_rls.security.context import SecurityContext
 from secure_rls.security.egress import (
     EgressViolation,
     scan_for_injection,
+    scan_for_tenant_mentions,
     verify_rows,
-    verify_text,
     wrap_untrusted,
 )
 from secure_rls.security.sql_guard import SqlGuardError, guard
@@ -55,10 +55,28 @@ def test_live_query_results_pass_the_tripwire(db_path: Path, tenant: str) -> Non
     verify_rows(rows, ctx)  # sqlite3.Row, not dict
 
 
-def test_composed_text_may_not_name_another_tenant() -> None:
-    verify_text("Average salary in Engineering is 128,400", ctx_for("acme"))
-    with pytest.raises(EgressViolation):
-        verify_text("Compared with beta, salaries are higher", ctx_for("acme"))
+def test_foreign_tenant_mentions_are_reported_not_raised() -> None:
+    ctx = ctx_for("acme")
+    assert scan_for_tenant_mentions("Average salary in Engineering is 128,400", ctx) == ()
+    assert scan_for_tenant_mentions("Compared with beta, salaries are higher", ctx) == ("beta",)
+
+
+@pytest.mark.parametrize(
+    "prose",
+    [
+        "The beta version of the review process was rolled out",
+        "Alpha, beta and gamma testing phases were completed",
+        "Gamma correction was applied to the chart",
+    ],
+)
+def test_ordinary_prose_is_never_blocked(prose: str) -> None:
+    """Tenant names here are ordinary English words.
+
+    Reporting them is fine; refusing an answer because of them is not, which is
+    why this check no longer raises. The blocking control is verify_rows, and it
+    looks at data rather than wording.
+    """
+    scan_for_tenant_mentions(prose, ctx_for("acme"))  # must not raise
 
 
 # --------------------------------------------------------------------------

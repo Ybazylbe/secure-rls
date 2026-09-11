@@ -6,6 +6,9 @@ another tenant. In a correct system it never fires -- which is exactly why it
 is worth having. It converts a silent regression in the view definition, the
 authorizer or the SQL guard into a loud, logged failure instead of a leak.
 
+The blocking control here is :func:`verify_rows`, on data. Text the agent
+writes is only scanned and reported: wording is too weak a signal to abort on.
+
 It also handles the other direction of trust. The ``notes`` column is free text
 written by people; in this dataset some of it deliberately contains
 instructions aimed at the model. Text taken from the database is data, never
@@ -64,18 +67,25 @@ def verify_rows(rows: Iterable[Any], ctx: SecurityContext) -> None:
         )
 
 
-def verify_text(text: str, ctx: SecurityContext) -> None:
-    """Guard free text (a chart title, a summary) against naming other tenants.
+def scan_for_tenant_mentions(text: str, ctx: SecurityContext) -> tuple[str, ...]:
+    """Report foreign tenant names appearing in text the agent composed.
 
-    Coarser than :func:`verify_rows` -- a tenant name could legitimately appear
-    in prose -- so it is applied to values the agent composes about the data,
-    not to the data itself.
+    This deliberately does *not* raise. An earlier version did, and it was
+    wrong: the tenant names in this dataset are ordinary English words, so
+    "the beta version of the review process" tripped it. A detective control
+    with false positives on normal prose gets disabled, and then it protects
+    nothing.
+
+    It is also not where isolation is enforced -- :func:`verify_rows` is, on
+    the data itself, and it cannot be fooled by wording. A mention here means
+    only that the answer text is worth a look, so the finding goes to the audit
+    log as a signal rather than aborting a legitimate reply.
     """
-    others = [t for t in TENANTS if t != ctx.tenant_id and re.search(rf"\b{t}\b", text, re.I)]
-    if others:
-        raise EgressViolation(
-            f"output mentioned other tenant(s) {others}", offending=others
-        )
+    return tuple(
+        tenant
+        for tenant in TENANTS
+        if tenant != ctx.tenant_id and re.search(rf"\b{tenant}\b", text, re.I)
+    )
 
 
 # ---------------------------------------------------------------------------

@@ -37,7 +37,9 @@ metadata-фильтра при поиске. В README — сравнение п
 - Python 3.12, `uv` (fallback `pip` + `requirements.txt` — файл требуют явно)
 - LangGraph (явный граф состояний: plan → tool → **guard** → execute → verify → answer)
 - SQLite (stdlib) + `sqlglot` (AST-валидация)
-- Ollama: `qwen2.5:7b-instruct` (надёжный tool-calling) + fallback `llama3.1:8b`
+- Ollama, провайдер абстрагирован. Дефолт **`mistral-nemo:12b`** (Mistral, Франция,
+  Apache 2.0). Сравниваются также `llama3.1:8b` (US) и `qwen2.5:14b-instruct` (CN) —
+  см. §7 Model sovereignty
 - RAG: `sentence-transformers` (bge-small-en-v1.5) + FAISS, индекс на тенанта
 - Streamlit, `passlib[argon2]`, `pydantic` (схемы tool'ов), `structlog` (аудит)
 - pytest, ruff, mypy, GitHub Actions, Docker/GHCR
@@ -61,7 +63,8 @@ evals/
   golden/    correctness.yaml     # ~40 NL→ожидаемый результат
   redteam/   attacks.yaml         # ~50 атак, ассерт: 0 утечек
   runner.py  report.py            # markdown/HTML отчёт с метриками
-docs/      ARCHITECTURE.md  THREAT_MODEL.md  EVALUATION.md  AGENTIC_WORKFLOW.md  DEMO_SCRIPT.md
+docs/      ARCHITECTURE.md  THREAT_MODEL.md  EVALUATION.md  MODEL_SOVEREIGNTY.md
+           AGENTIC_WORKFLOW.md  DEMO_SCRIPT.md
 .claude/   CLAUDE.md  agents/  commands/  settings.json (hooks)
 .github/workflows/  ci.yml  deploy.yml  evals.yml
 tests/
@@ -70,7 +73,8 @@ tests/
 ## 4. План по фазам (~22–26 ч, 5 дней)
 
 ### Фаза 0 — Подготовка (1 ч)
-- `brew install ollama`, `ollama pull qwen2.5:7b-instruct`, проверить tool-calling.
+- `brew install ollama`; забрать три модели (mistral-nemo:12b, llama3.1:8b,
+  qwen2.5:14b-instruct), проверить tool-calling у каждой.
 - Создать публичный репо `secure-rls`, первый коммит: скелет + README-заготовка.
 - `.claude/CLAUDE.md` сразу — правила проекта (никогда не ослаблять L1–L5 без теста).
 
@@ -109,6 +113,9 @@ tests/
 - **Red team**: ~50 атак в 6 категориях — cross-tenant, SQL-инъекция через NL, jailbreak,
   indirect injection из `notes`, exfil через агрегаты/побочные каналы, обход через plot/RAG.
   Метрика: **leak rate**, целевое значение 0/50. Это цифра, которую называешь на звонке.
+- **Мульти-модельный прогон**: весь сьют гоняется на трёх моделях (EU/US/CN).
+  Ожидаемый результат — accuracy различается, **leak rate 0 у всех трёх**.
+  Это эмпирическое доказательство тезиса «модель не в периметре доверия».
 - Латентность + токены на запрос, отчёт `evals/report.md`, график.
 - Прогон в CI, результат — в README бейджем.
 
@@ -131,8 +138,42 @@ tests/
 - README: архитектурная диаграмма, threat model (краткая), setup за 3 команды, креды
   тенантов, результаты eval'ов, challenges, честное время.
 - `docs/THREAT_MODEL.md`: STRIDE-lite, границы доверия, что вне скоупа (и почему).
+- `docs/MODEL_SOVEREIGNTY.md`: см. §7.
 - `docs/DEMO_SCRIPT.md`: тайминг 5/30/10/15 мин.
 - Полная репетиция с таймером + запасной вариант (записанное видео, прогретая БД/модель).
+
+## 4b. Model sovereignty (для европейского заказчика)
+
+Компания, судя по всему, словацкая/чешская — вопрос про происхождение модели и суверенитет
+данных почти наверняка всплывёт. Не угадывать «правильный» ответ, а встроить его в решение.
+
+**Ключевое различие:** опасения вокруг китайских моделей относятся к облачным сервисам
+(кейс DeepSeek 2025 — блокировка Garante в Италии, запреты на госустройствах), где данные
+физически покидали ЕС. Здесь Ollama: веса на диске, инференс локальный, **egress = 0**.
+GDPR-претензий нет; EU AI Act не ограничивает модели по происхождению. Остаётся реальным
+лишь одно: веса — непрозрачный бинарник, аудит на закладки невозможен. Это и записать честно.
+
+Таблица лицензий в README (проверить актуальность на релизе конкретного варианта):
+
+| Модель | Происхождение | Лицензия |
+|---|---|---|
+| mistral-nemo:12b / mistral-small | Mistral, Франция | Apache 2.0 |
+| qwen2.5:14b-instruct / qwen3 | Alibaba, КНР | Apache 2.0 |
+| llama3.1:8b | Meta, США | Llama Community License (порог 700M MAU, AUP, атрибуция) |
+| gemma | Google, США | Gemma Terms of Use, не OSI |
+
+Полезный контринтуитивный факт: формально самая открытая из ходовых — китайская, а
+американская Llama под кастомной лицензией с ограничениями. Для коммерческого продукта
+Apache 2.0 чище.
+
+Что делаем:
+- дефолт в конфиге — `mistral-nemo:12b` (EU, Apache 2.0, ~7 ГБ, быстрый на M1 Pro);
+- смена модели — одна строка в конфиге (`llm/provider.py`);
+- eval-сьют гоняется на всех трёх, в README — таблица результатов.
+
+Формулировка для звонка: «accuracy у моделей разная — вот таблица; leak rate нулевой у всех
+трёх, потому что модель не входит в периметр доверия. Выбор модели — вопрос закупок и
+лицензии, а не безопасности, и меняется одной строкой конфига.»
 
 ## 5. Чек-лист «звучит как senior» на звонке
 
@@ -141,13 +182,15 @@ tests/
 - «Leak rate 0/50 на red-team suite, гоняется в CI на каждый PR.»
 - «В датасет специально положена indirect prompt injection — вот как система её переживает.»
 - «Отдельные индексы на тенанта вместо metadata-фильтра, потому что <trade-off>.»
+- «Дефолт — европейская модель под Apache 2.0, но безопасность от выбора модели не зависит:
+  вот прогон на EU/US/CN моделях, leak rate 0 у всех.»
 - Честно про ограничения: нет реального Postgres RLS / нет ротации ключей / single-node.
 
 ## 6. Риски
 
 | Риск | Митигация |
 |---|---|
-| Слабый tool-calling у 7B-модели | qwen2.5-instruct; structured output + retry; fallback-парсер |
+| Слабый tool-calling у малых моделей | mistral-nemo:12b как дефолт; structured output + retry; fallback-парсер; qwen2.5:14b как более точный вариант |
 | Деплой с Ollama в облаке | абстракция провайдера + demo-режим, задокументировать честно |
 | Не хватит времени | MVP-порядок: L1–L4 + 3 tool'а + red-team suite. Plot/RAG/anomaly — опционально |
 | «Вылизанная» история коммитов | коммитить итеративно по ходу, не squash'ить |

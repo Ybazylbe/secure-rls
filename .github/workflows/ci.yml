@@ -1,0 +1,131 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHON_DEFAULT: "3.12"
+
+jobs:
+  # The gate that matters. It runs first and alone so that a failure here is
+  # unmistakable in the checks list: these are the tests that assert one tenant
+  # cannot reach another's rows. None of them needs a language model, which is
+  # exactly why isolation can be enforced in CI at all.
+  isolation:
+    name: Isolation guarantees
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_DEFAULT }}
+          cache: pip
+      - run: pip install -r requirements-dev.txt
+      - name: Generate the dataset
+        run: python scripts/gen_data.py
+      - name: Row-level security tests
+        run: |
+          python -m pytest -v -m "not slow" \
+            tests/test_isolation.py \
+            tests/test_sql_guard.py \
+            tests/test_egress.py \
+            tests/test_tools.py \
+            tests/test_auth.py
+
+  tests:
+    name: Tests (py${{ matrix.python }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.10", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+      - run: pip install -r requirements-dev.txt
+      - run: python scripts/gen_data.py
+      - name: Full suite
+        run: python -m pytest -m "not slow" --cov=secure_rls --cov-report=term-missing
+
+  quality:
+    name: Lint and types
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_DEFAULT }}
+          cache: pip
+      - run: pip install -r requirements-dev.txt
+      - run: python -m ruff check .
+      - run: python -m mypy
+
+  retrieval:
+    name: Retrieval isolation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_DEFAULT }}
+          cache: pip
+      - run: pip install -r requirements-dev.txt
+      # The embedding model is a few hundred megabytes; caching it keeps this
+      # job from re-downloading on every run.
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/huggingface
+          key: hf-${{ hashFiles('requirements.txt') }}
+      - run: python scripts/gen_data.py
+      - name: Per-tenant index tests
+        run: python -m pytest -v -m slow
+
+  image:
+    name: Container image
+    runs-on: ubuntu-latest
+    needs: [isolation, tests, quality]
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Normalise the image name
+        id: name
+        run: echo "repo=$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
+
+      - name: Build
+        run: docker build -t "ghcr.io/${{ steps.name.outputs.repo }}:${{ github.sha }}" .
+
+      # The image ships without a model, so this checks the one thing that does
+      # not need one: that it starts, and that each tenant sees only its own
+      # rows. A container that boots but leaks is not a working container.
+      - name: Smoke-test isolation inside the image
+        run: |
+          docker run --rm "ghcr.io/${{ steps.name.outputs.repo }}:${{ github.sha }}" python -c "
+          import db
+          from secure_rls.security.context import SecurityContext
+          for tenant, expected in (('acme', 450), ('beta', 330), ('gamma', 220)):
+              seen = db.row_count(SecurityContext(1, 'ci', tenant))
+              assert seen == expected, (tenant, seen)
+          print('image starts and enforces per-tenant row counts')
+          "
+
+      - name: Publish from main
+        if: github.ref == 'refs/heads/main'
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          docker tag "ghcr.io/${{ steps.name.outputs.repo }}:${{ github.sha }}" \
+                     "ghcr.io/${{ steps.name.outputs.repo }}:latest"
+          docker push "ghcr.io/${{ steps.name.outputs.repo }}:${{ github.sha }}"
+          docker push "ghcr.io/${{ steps.name.outputs.repo }}:latest"

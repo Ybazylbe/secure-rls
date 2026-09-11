@@ -1,0 +1,82 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 400" width="960" height="400" font-family="ui-sans-serif, -apple-system, Segoe UI, Helvetica, Arial, sans-serif">
+  <defs>
+    <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0 0 L10 5 L0 10 z" fill="#6b7280"/>
+    </marker>
+    <marker id="ared" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0 0 L10 5 L0 10 z" fill="#b91c1c"/>
+    </marker>
+    <style>
+      .box   { fill:#ffffff; stroke:#d1d5db; stroke-width:1.5; rx:8; }
+      .layer { fill:#f0f6ff; stroke:#3b6fb5; stroke-width:1.5; rx:8; }
+      .name  { font-size:14px; font-weight:600; fill:#111827; }
+      .tag   { font-size:11px; font-weight:700; fill:#3b6fb5; letter-spacing:.06em; }
+      .note  { font-size:11.5px; fill:#4b5563; }
+      .flow  { stroke:#6b7280; stroke-width:1.6; fill:none; marker-end:url(#a); }
+      .title { font-size:15px; font-weight:700; fill:#111827; }
+      .cap   { font-size:12px; fill:#6b7280; }
+    </style>
+  </defs>
+
+  <rect width="960" height="400" fill="#fbfbfa"/>
+  <text x="30" y="34" class="title">The model chooses what to ask for. It has no way to choose whose.</text>
+  <text x="30" y="54" class="cap">Isolation is enforced below the SQL the model writes — not by the prompt.</text>
+
+  <!-- untrusted model -->
+  <rect x="300" y="86" width="150" height="56" rx="8" fill="#fff5f5" stroke="#b91c1c" stroke-width="1.5" stroke-dasharray="5 4"/>
+  <text x="375" y="109" text-anchor="middle" class="name" fill="#b91c1c">LLM</text>
+  <text x="375" y="128" text-anchor="middle" class="note" fill="#b91c1c">untrusted · outside the boundary</text>
+  <path d="M375 142 L375 186" class="flow"/>
+  <text x="388" y="170" class="note" fill="#b91c1c">tool calls, SQL</text>
+
+  <!-- untrusted notes -->
+  <rect x="640" y="86" width="150" height="56" rx="8" fill="#fff5f5" stroke="#b91c1c" stroke-width="1.5" stroke-dasharray="5 4"/>
+  <text x="715" y="109" text-anchor="middle" class="name" fill="#b91c1c">notes column</text>
+  <text x="715" y="128" text-anchor="middle" class="note" fill="#b91c1c">people's text · may address the model</text>
+
+  <!-- main row -->
+  <rect x="30"  y="190" width="96"  height="60" class="box"/>
+  <text x="78"  y="216" text-anchor="middle" class="name">user</text>
+  <text x="78"  y="234" text-anchor="middle" class="note">signs in</text>
+
+  <rect x="160" y="190" width="120" height="60" class="layer"/>
+  <text x="220" y="211" text-anchor="middle" class="tag">L1</text>
+  <text x="220" y="229" text-anchor="middle" class="name">identity</text>
+  <text x="220" y="244" text-anchor="middle" class="note">tenant fixed here</text>
+
+  <rect x="314" y="190" width="122" height="60" class="layer"/>
+  <text x="375" y="211" text-anchor="middle" class="tag">L1</text>
+  <text x="375" y="229" text-anchor="middle" class="name">tools</text>
+  <text x="375" y="244" text-anchor="middle" class="note">no tenant argument</text>
+
+  <rect x="470" y="190" width="120" height="60" class="layer"/>
+  <text x="530" y="211" text-anchor="middle" class="tag">L4</text>
+  <text x="530" y="229" text-anchor="middle" class="name">SQL guard</text>
+  <text x="530" y="244" text-anchor="middle" class="note">AST, not strings</text>
+
+  <rect x="624" y="190" width="140" height="60" class="layer"/>
+  <text x="694" y="211" text-anchor="middle" class="tag">L2 · L3</text>
+  <text x="694" y="229" text-anchor="middle" class="name">connection</text>
+  <text x="694" y="244" text-anchor="middle" class="note">tenant view + authorizer</text>
+
+  <rect x="798" y="190" width="132" height="60" class="box"/>
+  <text x="864" y="216" text-anchor="middle" class="name">employees_all</text>
+  <text x="864" y="234" text-anchor="middle" class="note">all three tenants</text>
+
+  <path d="M126 220 L156 220" class="flow"/>
+  <path d="M280 220 L310 220" class="flow"/>
+  <path d="M436 220 L466 220" class="flow"/>
+  <path d="M590 220 L620 220" class="flow"/>
+  <path d="M764 220 L794 220" class="flow"/>
+  <path d="M715 142 L715 186" class="flow" marker-end="url(#ared)" stroke="#b91c1c"/>
+
+  <!-- return path through egress -->
+  <rect x="470" y="296" width="120" height="56" class="layer"/>
+  <text x="530" y="317" text-anchor="middle" class="tag">L5</text>
+  <text x="530" y="335" text-anchor="middle" class="name">egress check</text>
+
+  <path d="M864 250 L864 324 L594 324" class="flow"/>
+  <path d="M466 324 L375 324 L375 254" class="flow"/>
+  <text x="700" y="316" text-anchor="middle" class="note">rows returned</text>
+  <text x="300" y="316" text-anchor="end" class="note">refuses any foreign tenant_id</text>
+</svg>

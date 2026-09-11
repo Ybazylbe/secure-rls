@@ -13,8 +13,9 @@ the model is instructed to behave, but that misbehaving buys it nothing.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -239,12 +240,15 @@ def build_tools(
         ),
     ]
 
+    # The casts are for the type checker only: langchain types `func` as
+    # Callable and `args_schema` as type[BaseModel], and a plain function and a
+    # pydantic model class do not match those spellings exactly.
     return [
         StructuredTool.from_function(
-            func=func,
+            func=cast("Callable[..., Any]", func),
             name=name,
             description=description,
-            args_schema=schema,
+            args_schema=cast("type[BaseModel]", schema),
             response_format="content_and_artifact",
         )
         for func, name, schema, description in specs

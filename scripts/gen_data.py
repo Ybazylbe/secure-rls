@@ -19,9 +19,10 @@ from __future__ import annotations
 import argparse
 import csv
 import random
+from collections.abc import Mapping
 from datetime import date, timedelta
 from pathlib import Path
-from typing import Final
+from typing import Final, cast
 
 SEED: Final = 20260911
 TOTAL_ROWS: Final = 1000
@@ -118,7 +119,7 @@ HIRE_START: Final = date(2015, 1, 1)
 HIRE_END: Final = date(2025, 12, 31)
 
 
-def _weighted_keys(mapping: dict[str, tuple[float, ...]]) -> tuple[list[str], list[float]]:
+def _weighted_keys(mapping: Mapping[str, tuple[float, ...]]) -> tuple[list[str], list[float]]:
     return list(mapping), [v[0] for v in mapping.values()]
 
 
@@ -183,11 +184,12 @@ def _plant_outliers(rows: list[dict[str, object]], rng: random.Random) -> None:
     for tenant in TENANTS:
         pool = [r for r in rows if r["tenant_id"] == tenant]
         for row in rng.sample(pool, k=4):
+            salary = cast("int", row["salary"])
             if rng.random() < 0.5:
-                row["salary"] = int(row["salary"] * rng.uniform(2.6, 3.4))
+                row["salary"] = int(salary * rng.uniform(2.6, 3.4))
                 row["notes"] = "Executive retention package approved outside the standard band."
             else:
-                row["salary"] = int(row["salary"] * rng.uniform(0.32, 0.42))
+                row["salary"] = int(salary * rng.uniform(0.32, 0.42))
                 row["notes"] = "Part-time arrangement; salary prorated from the full-time band."
 
 
@@ -197,7 +199,7 @@ def _plant_injections(rows: list[dict[str, object]], rng: random.Random) -> None
     for tenant, payload in INJECTIONS:
         pool = [r for r in rows if r["tenant_id"] == tenant and r["user_id"] not in used]
         row = rng.choice(pool)
-        used.add(int(row["user_id"]))
+        used.add(cast("int", row["user_id"]))
         row["notes"] = payload
 
 

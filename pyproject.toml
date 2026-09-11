@@ -23,10 +23,18 @@ select = ["E", "F", "I", "UP", "B", "SIM", "S"]
 per-file-ignores = { "tests/*" = ["S101", "S608", "SIM117"], "evals/*" = ["S101", "S608"], "scripts/gen_data.py" = ["S311"] }
 
 [tool.mypy]
-python_version = "3.10"
+# No python_version pin: mypy then type-checks against the interpreter actually
+# running it. Pinning 3.10 while running 3.12 made it parse numpy's stubs under
+# the wrong grammar and fail before reaching any of our code.
 strict = true
 files = ["secure_rls", "db.py", "scripts", "evals"]
 
 [[tool.mypy.overrides]]
-module = ["faiss.*", "sentence_transformers.*", "streamlit.*", "plotly.*"]
+# Third parties without usable stubs. Listed explicitly rather than globally
+# silenced, so adding a dependency is a deliberate decision.
+module = [
+    "faiss.*", "sentence_transformers.*", "streamlit.*", "plotly.*",
+    "pandas.*", "sqlglot.*", "langchain_core.*", "langchain_ollama.*",
+    "langgraph.*",
+]
 ignore_missing_imports = true

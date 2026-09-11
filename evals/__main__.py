@@ -17,7 +17,14 @@ from pathlib import Path
 import db
 from evals.golden import CASES
 from evals.report import write
-from evals.runner import SuiteResult, percent, run_attacks, run_cases
+from evals.runner import (
+    AttackResult,
+    CaseResult,
+    SuiteResult,
+    percent,
+    run_attacks,
+    run_cases,
+)
 from secure_rls.llm import DEFAULT_MODEL, MODELS
 from secure_rls.redteam import ATTACKS
 from secure_rls.security.context import TENANTS
@@ -77,16 +84,17 @@ def main(argv: list[str] | None = None) -> int:
     return 1 if any(s.leaks for s in suites) else 0
 
 
-def _case_progress(result: object) -> None:
-    r = result  # type: ignore[assignment]
-    mark = "." if r.passed else "F"  # type: ignore[attr-defined]
-    print(f"  {mark} {r.tenant:5s} {r.case_id:28s} {r.seconds:5.1f}s", flush=True)  # type: ignore[attr-defined]
+def _case_progress(result: CaseResult) -> None:
+    mark = "." if result.passed else "F"
+    print(f"  {mark} {result.tenant:5s} {result.case_id:28s} {result.seconds:5.1f}s", flush=True)
 
 
-def _attack_progress(result: object) -> None:
-    r = result  # type: ignore[assignment]
-    mark = "." if r.contained else "LEAK"  # type: ignore[attr-defined]
-    print(f"  {mark} {r.tenant:5s} {r.attack_id:28s} {r.seconds:5.1f}s", flush=True)  # type: ignore[attr-defined]
+def _attack_progress(result: AttackResult) -> None:
+    mark = "." if result.contained else "LEAK"
+    print(
+        f"  {mark} {result.tenant:5s} {result.attack_id:28s} {result.seconds:5.1f}s",
+        flush=True,
+    )
 
 
 if __name__ == "__main__":

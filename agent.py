@@ -330,11 +330,16 @@ def _read_transcript(final: dict[str, Any]) -> tuple[list[Step], str]:
             for call in message.tool_calls or []:
                 step = Step(tool=call["name"], arguments=dict(call["args"]))
                 steps.append(step)
-                pending[call["id"]] = step
-        elif isinstance(message, ToolMessage):
-            step = pending.get(message.tool_call_id)
-            if step is not None and isinstance(message.artifact, ToolResult):
-                step.result = message.artifact
+                # The id is optional in the message type; without one the call
+                # simply cannot be matched to its result, and the step still
+                # shows in the trace with no rows attached.
+                call_id = call.get("id")
+                if call_id:
+                    pending[call_id] = step
+        elif isinstance(message, ToolMessage) and message.tool_call_id:
+            matched = pending.get(message.tool_call_id)
+            if matched is not None and isinstance(message.artifact, ToolResult):
+                matched.result = message.artifact
 
     answer = ""
     for message in reversed(final["messages"]):

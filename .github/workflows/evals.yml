@@ -1,0 +1,67 @@
+# The evaluation suite needs a language model, so it does not belong in the
+# pull-request path: a model pull is gigabytes and several minutes, and the
+# answers vary in ways a blocking check should not. It runs on a schedule and
+# on demand instead, and it fails only on a leak -- accuracy is reported, not
+# enforced, because a model that answers worse is a procurement decision while
+# a model that leaks is a defect.
+name: Evaluations
+
+on:
+  workflow_dispatch:
+    inputs:
+      model:
+        description: Ollama model tag to evaluate
+        default: llama3.2:3b
+      suite:
+        description: What to run
+        type: choice
+        options: [attacks-only, everything]
+        default: attacks-only
+  schedule:
+    - cron: "0 4 * * 1"  # Mondays, 04:00 UTC
+
+jobs:
+  evaluate:
+    name: ${{ inputs.model || 'llama3.2:3b' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements-dev.txt
+      - run: python scripts/gen_data.py
+
+      - name: Install Ollama
+        run: curl -fsSL https://ollama.com/install.sh | sh
+
+      - name: Start Ollama and pull the model
+        env:
+          MODEL: ${{ inputs.model || 'llama3.2:3b' }}
+        run: |
+          ollama serve &
+          for _ in $(seq 1 30); do
+            curl -sf http://127.0.0.1:11434/api/version && break
+            sleep 2
+          done
+          ollama pull "$MODEL"
+
+      - name: Run the suite
+        env:
+          MODEL: ${{ inputs.model || 'llama3.2:3b' }}
+          SUITE: ${{ inputs.suite || 'attacks-only' }}
+        run: |
+          FLAG=""
+          [ "$SUITE" = "attacks-only" ] && FLAG="--attacks-only"
+          python -m evals --models "$MODEL" $FLAG --out evals/results
+
+      - name: Publish the report
+        run: cat evals/results/report.md >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: evaluation-report
+          path: evals/results/

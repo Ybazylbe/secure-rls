@@ -117,7 +117,15 @@ def guard(sql: str, ctx: SecurityContext, *, max_rows: int = MAX_ROWS) -> Guarde
 # ---------------------------------------------------------------------------
 
 
-def _parse_single(sql: str) -> exp.Query:
+def _parse_single(sql: str) -> exp.Expression:
+    """Parse one read-only statement.
+
+    Returns ``Expression`` rather than ``Query``: in sqlglot those are separate
+    branches of the hierarchy -- ``Select`` inherits both, but ``Query`` on its
+    own does not descend from ``Expression`` and so has none of the traversal
+    methods the checks below rely on. ``Query`` is what we verify, not what we
+    carry around.
+    """
     if not sql or not sql.strip():
         raise SqlGuardError("empty statement", sql=sql)
     try:
@@ -134,7 +142,7 @@ def _parse_single(sql: str) -> exp.Query:
         )
 
     statement = statements[0]
-    if not isinstance(statement, exp.Query):
+    if not isinstance(statement, exp.Expression) or not isinstance(statement, exp.Query):
         raise SqlGuardError(
             f"only read-only SELECT statements are allowed, got "
             f"{type(statement).__name__.upper()}",

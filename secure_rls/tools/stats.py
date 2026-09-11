@@ -277,7 +277,7 @@ def _grouped(
         grouped.max() - grouped.min() if metric == "spread"
         else getattr(grouped, _PANDAS_METRIC[metric])()
     )
-    rows = tuple(
+    rows: tuple[dict[str, object], ...] = tuple(
         {group_by: str(key), f"{metric}_{column}": _number(value)}
         for key, value in series.sort_values(ascending=False).items()
     )

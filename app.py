@@ -31,16 +31,105 @@ from secure_rls.redteam import ATTACKS, Attack, featured, verdict
 from secure_rls.security.audit import AuditLog
 from secure_rls.security.context import SecurityContext
 
-st.set_page_config(page_title="Secure RLS Analyst", page_icon="🔐", layout="wide")
+st.set_page_config(
+    page_title="Secure RLS Analyst",
+    page_icon="🔐",
+    layout="centered",
+    initial_sidebar_state="expanded",
+)
 
-#: (button label, question). Short labels: five full questions across one row
-#: get ellipsised into uselessness on anything narrower than a wide desktop.
+#: Streamlit's defaults are fine for a dashboard and wrong for a chat. This
+#: narrows the column, turns the tab strip into a compact pill row, gives the
+#: messages proper bubbles with the user's on the right, and turns the
+#: suggestion buttons into chips sitting just above the pinned input. Selectors
+#: are scoped to Streamlit's stable test ids and to element keys, so they do not
+#: bleed into widgets they were not meant for.
+STYLE = """
+<style>
+  [data-testid="stMainBlockContainer"] { max-width: 980px; padding-top: 2.2rem; }
+
+  /* the view switcher: a pill row, not a heavy tab strip */
+  [class*="st-key-view_nav"] [role="radiogroup"] { gap: .3rem; }
+  [class*="st-key-view_nav"] label {
+      border-radius: 999px !important;
+      padding: .28rem .95rem !important;
+      font-size: .88rem !important;
+      border: 1px solid rgba(128,128,128,.22) !important;
+  }
+
+  /* message bubbles */
+  [data-testid="stChatMessage"] {
+      background: transparent;
+      padding: .1rem 0 .5rem 0;
+      gap: .7rem;
+  }
+  [data-testid="stChatMessage"] [data-testid="stChatMessageContent"] {
+      background: rgba(128,128,128,.07);
+      border: 1px solid rgba(128,128,128,.14);
+      border-radius: 16px;
+      padding: .7rem 1rem;
+      flex: 0 1 auto;
+      min-width: 0;
+  }
+  /* the assistant's turn carries tables and traces, so it gets the width */
+  [data-testid="stChatMessage"]:has([data-testid="stChatMessageAvatarAssistant"])
+      [data-testid="stChatMessageContent"] { flex: 1 1 auto; }
+
+  /* the person's own turn, on the right, the way every chat does it.
+     row-reverse flips the main axis, so flex-start packs it to the right. */
+  [data-testid="stChatMessage"]:has([data-testid="stChatMessageAvatarUser"]) {
+      flex-direction: row-reverse;
+      justify-content: flex-start;
+  }
+  [data-testid="stChatMessage"]:has([data-testid="stChatMessageAvatarUser"])
+      [data-testid="stChatMessageContent"] { max-width: 72%; }
+  [data-testid="stChatMessage"]:has([data-testid="stChatMessageAvatarUser"])
+      [data-testid="stChatMessageContent"] {
+      background: rgba(59,111,181,.10);
+      border-color: rgba(59,111,181,.22);
+  }
+
+  /* suggestion chips */
+  [class*="st-key-chip_"] button {
+      border-radius: 999px !important;
+      padding: .18rem .8rem !important;
+      font-size: .8rem !important;
+      font-weight: 450 !important;
+      min-height: 0 !important;
+      border: 1px solid rgba(128,128,128,.25) !important;
+      background: transparent !important;
+      color: rgba(90,95,105,1) !important;
+  }
+  [class*="st-key-chip_"] button:hover {
+      border-color: rgba(59,111,181,.55) !important;
+      color: #3b6fb5 !important;
+  }
+
+  /* the pinned composer */
+  [data-testid="stChatInput"] {
+      border-radius: 16px;
+      border: 1px solid rgba(128,128,128,.25);
+      box-shadow: 0 2px 14px rgba(0,0,0,.05);
+  }
+
+  /* the reasoning trace should read as a footnote, not as a second answer */
+  [data-testid="stExpander"] details {
+      border: 1px solid rgba(128,128,128,.16);
+      border-radius: 12px;
+      background: rgba(128,128,128,.03);
+  }
+  [data-testid="stExpander"] summary { font-size: .85rem; }
+</style>
+"""
+
+#: (chip label, question). Short labels: five full questions across one row get
+#: ellipsised into uselessness on anything narrower than a wide desktop.
 SUGGESTIONS = (
-    ("Avg in Engineering", "What is the average salary in Engineering?"),
-    ("Top departments", "Which departments have the highest average salary?"),
-    ("Salary outliers", "Show me salary outliers."),
-    ("Chart by dept", "Draw a bar chart of average salary by department."),
-    ("Retention risks", "Who is flagged as a retention risk in the notes?"),
+    ("Avg salary", "What is the average salary in Engineering?"),
+    ("By department", "Which departments have the highest average salary?"),
+    ("Outliers", "Which employees have an unusual salary for their department?"),
+    ("Top earners", "List the five highest paid employees with their departments."),
+    ("Notes", "Who is flagged as a retention risk in the review notes?"),
 )
 
 
@@ -202,36 +291,32 @@ def tenant_badge(ctx: SecurityContext, rows: int) -> None:
 # ---------------------------------------------------------------------------
 
 
-def chat_tab(ctx: SecurityContext, model: str) -> None:
+def chat_view(ctx: SecurityContext, model: str, question: str | None) -> None:
+    """Transcript above, chips at the foot of it, composer pinned below.
+
+    ``question`` arrives from the composer, which lives in :func:`main` because
+    Streamlit only pins ``chat_input`` to the bottom of the window when it is a
+    top-level element. Everything rendered here therefore sits above it.
+    """
     history: list[dict[str, Any]] = st.session_state.setdefault("history", [])
 
-    columns = st.columns(len(SUGGESTIONS))
-    for column, (label, question) in zip(columns, SUGGESTIONS, strict=True):
-        if column.button(label, use_container_width=True, key=f"s_{label}", help=question):
-            st.session_state["pending"] = question
+    if not history and not question:
+        st.markdown(
+            f"#### Ask about {ctx.tenant_id}'s employees\n"
+            "Every answer is computed from the rows you are allowed to see. "
+            "Open a step to check the SQL that ran."
+        )
 
-    # The transcript is claimed before the input box is created, so the
-    # conversation renders above the place you type into. Streamlit lays widgets
-    # out in call order, and the question has to be read before the new turn can
-    # be rendered -- without the placeholder the input box ends up between the
-    # suggestions and the conversation.
-    transcript = st.container()
-    asked = st.chat_input("Ask about your employees")
-    question = asked or st.session_state.pop("pending", None)
+    for turn in history:
+        with st.chat_message("user"):
+            st.write(turn["question"])
+        with st.chat_message("assistant"):
+            st.write(turn["answer"].text)
+            for chart in turn["answer"].charts:
+                render_chart(chart)
+            render_trace(turn["answer"])
 
-    with transcript:
-        for turn in history:
-            with st.chat_message("user"):
-                st.write(turn["question"])
-            with st.chat_message("assistant"):
-                st.write(turn["answer"].text)
-                for chart in turn["answer"].charts:
-                    render_chart(chart)
-                render_trace(turn["answer"])
-
-        if not question:
-            return
-
+    if question:
         with st.chat_message("user"):
             st.write(question)
         with st.chat_message("assistant"), st.spinner("Thinking..."):
@@ -241,6 +326,26 @@ def chat_tab(ctx: SecurityContext, model: str) -> None:
                 render_chart(chart)
             render_trace(answer)
         history.append({"question": question, "answer": answer})
+
+    _suggestion_chips()
+
+
+def _suggestion_chips() -> str | None:
+    """A row of chips at the foot of the transcript, just above the composer."""
+    st.caption("Try")
+    # A trailing spacer column keeps the chips at their natural width instead of
+    # stretching each one across an equal share of the row.
+    # The trailing spacer keeps the chips at their natural width instead of
+    # stretching each across an equal share of the row; it is not paired with a
+    # suggestion, hence the slice.
+    columns = st.columns([*(1 for _ in SUGGESTIONS), 2], gap="small")
+    for index, (column, (label, prompt)) in enumerate(
+        zip(columns[: len(SUGGESTIONS)], SUGGESTIONS, strict=True)
+    ):
+        if column.button(label, key=f"chip_{index}", help=prompt):
+            st.session_state["pending"] = prompt
+            st.rerun()
+    return None
 
 
 def security_tab(ctx: SecurityContext, model: str) -> None:
@@ -402,8 +507,19 @@ def audit_tab(ctx: SecurityContext) -> None:
 # ---------------------------------------------------------------------------
 
 
+#: View name -> the icon shown on its pill.
+VIEWS: dict[str, str] = {
+    "Chat": "💬",
+    "Security": "🛡️",
+    "Side by side": "👥",
+    "Audit": "📋",
+}
+
+
 def main() -> None:
     _database()
+    st.markdown(STYLE, unsafe_allow_html=True)
+
     ctx: SecurityContext | None = st.session_state.get("ctx")
     if ctx is None:
         login_screen()
@@ -425,16 +541,29 @@ def main() -> None:
             st.session_state.clear()
             st.rerun()
 
-    chat, security, compare, audit = st.tabs(
-        ["💬 Chat", "🛡️ Security", "👥 Side by side", "📋 Audit"]
+    # One view at a time rather than st.tabs: tabs render every panel, and a
+    # chat_input inside one of them is no longer a top-level element, so
+    # Streamlit stops pinning it to the bottom of the window.
+    view = (
+        st.segmented_control(
+            "view",
+            list(VIEWS),
+            default="Chat",
+            format_func=lambda name: f"{VIEWS[name]} {name}",
+            label_visibility="collapsed",
+            key="view_nav",
+        )
+        or "Chat"
     )
-    with chat:
-        chat_tab(ctx, model)
-    with security:
+
+    if view == "Chat":
+        question = st.chat_input(f"Ask about {ctx.tenant_id}'s employees")
+        chat_view(ctx, model, question or st.session_state.pop("pending", None))
+    elif view == "Security":
         security_tab(ctx, model)
-    with compare:
+    elif view == "Side by side":
         side_by_side_tab(ctx, model)
-    with audit:
+    else:
         audit_tab(ctx)
 
 

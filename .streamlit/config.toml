@@ -1,0 +1,11 @@
+# Keeps the demo looking the same on any machine, rather than inheriting
+# whatever theme the presenter happens to have set.
+[theme]
+base = "light"
+primaryColor = "#3b6fb5"
+backgroundColor = "#ffffff"
+secondaryBackgroundColor = "#f4f6fa"
+textColor = "#16181d"
+
+[browser]
+gatherUsageStats = false

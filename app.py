@@ -61,24 +61,36 @@ STYLE = f"""
       --line: {BORDER};
   }}
 
-  /* Streamlit's own header is 60px tall and floats over the page, so the
-     content starts below it and the sticky bar parks against it rather than
-     sliding underneath. */
+  /* Streamlit's header is a 60px band floating over the page at z-index
+     999990, holding only the Deploy menu on the right. The content starts at
+     the very top so the navigation sits inside that band, on the same line as
+     Deploy, rather than below it. */
   [data-testid="stMainBlockContainer"] {{
       max-width: 1080px;
-      padding-top: 4.4rem;
+      padding-top: 0;
   }}
+  /* Transparent so the navigation bar shows through the band it shares with
+     the Deploy menu. The bar sits above the header in z-order because the
+     header's toolbar spans the full width and would otherwise swallow every
+     click on the pills; the two do not overlap horizontally, so nothing is
+     hidden and the menu stays clickable where it actually is. */
+  [data-testid="stHeader"] {{ background: transparent; }}
 
   /* ---- the navigation bar: its own panel, pinned to the top ---- */
   [class*="st-key-navbar"] {{
       position: sticky;
-      top: 3.75rem;
-      z-index: 50;
+      top: 0;
+      z-index: 999991;
+      min-height: 60px;
+      display: flex;
+      align-items: center;
       background: #fff;
       border-bottom: 1px solid var(--line);
-      padding: .55rem 0 .5rem 0;
-      margin-bottom: 1.1rem;
+      margin-bottom: 1.2rem;
+
   }}
+  [class*="st-key-navbar"] > div {{ width: 100%; }}
+
   /* The segmented control renders as buttons carrying aria-checked, not as
      radio inputs, so the selected pill has to be matched on that attribute. */
   [class*="st-key-navbar"] button[data-variant="segmented_control"] {{
@@ -90,8 +102,15 @@ STYLE = f"""
       background: transparent !important;
       color: var(--teal-deep) !important;
   }}
-  [class*="st-key-navbar"] button[data-variant="segmented_control"]:hover {{
+  /* The hover tint must not land on the selected pill: it repaints the teal
+     fill in pale grey while the label stays white, and the active tab becomes
+     unreadable the moment the pointer crosses it. */
+  [class*="st-key-navbar"]
+      button[data-variant="segmented_control"]:not([aria-checked="true"]):hover {{
       background: var(--surface) !important;
+  }}
+  [class*="st-key-navbar"] button[aria-checked="true"]:hover {{
+      background: var(--teal) !important;
   }}
   [class*="st-key-navbar"] button[aria-checked="true"] {{
       background: var(--teal-deep) !important;

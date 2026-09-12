@@ -338,8 +338,19 @@ def _read_transcript(final: dict[str, Any]) -> tuple[list[Step], str]:
                     pending[call_id] = step
         elif isinstance(message, ToolMessage) and message.tool_call_id:
             matched = pending.get(message.tool_call_id)
-            if matched is not None and isinstance(message.artifact, ToolResult):
-                matched.result = message.artifact
+            artifact = getattr(message, "artifact", None)
+            # Identified by shape, not by class identity. Streamlit re-imports
+            # modules on a hot reload while `st.cache_resource` keeps the
+            # compiled agent across it, so the tools can hand back a ToolResult
+            # built from the *previous* copy of the module. `isinstance` then
+            # says no, the result is dropped, and the trace shows a tool call
+            # with no output even though the tool ran and the model used its
+            # answer. Worse, the Security tab judges containment from these
+            # results: with none recorded it saw no rows and reported the
+            # attack contained, which is a reassuring verdict backed by
+            # nothing.
+            if matched is not None and hasattr(artifact, "for_model"):
+                matched.result = artifact
 
     answer = ""
     for message in reversed(final["messages"]):

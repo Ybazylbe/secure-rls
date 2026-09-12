@@ -222,7 +222,10 @@ def build_tools(
             "(min_salary, max_performance, hired_from and so on) rather than "
             "answering about everyone: a count of all employees is not an answer to "
             "a question about some of them. For anything these filters cannot "
-            "express, use query_db.",
+            "express, use query_db. This tool returns aggregates only -- one "
+            "number, or one per group. It cannot list people, rank individuals "
+            "or return rows; for 'who', 'name them' or 'the top five employees', "
+            "use query_db.",
         ),
         (
             _plot, "plot", PlotArgs,

@@ -141,14 +141,23 @@ def render_trace(answer: AgentAnswer) -> None:
         return
     for index, step in enumerate(answer.steps, start=1):
         result = step.result
-        if result is None:
+        if step.rejected:
+            status, icon = "rejected", "🚫"
+        elif step.unverifiable:
             status, icon = "unrecorded", "⚠️"
-        elif result.refused:
+        elif result is not None and result.refused:
             status, icon = "refused", "🚫"
         else:
             status, icon = "ok", "✅"
         with st.expander(f"{icon} step {index}: `{step.tool}`", expanded=status != "ok"):
             st.json(step.arguments, expanded=False)
+            if step.rejected:
+                st.error(
+                    "The call was refused before it ran: the arguments are not ones "
+                    "this tool declares. Nothing was executed."
+                )
+                st.code(step.error or "", language="text")
+                continue
             if result is None:
                 st.warning(
                     "The tool ran but its output was not recorded, so nothing here "

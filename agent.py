@@ -18,6 +18,7 @@ guarantee the tests assert.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Annotated, Any, TypedDict
@@ -91,11 +92,27 @@ class AgentState(TypedDict):
 
 @dataclass(slots=True)
 class Step:
-    """One tool invocation, for the reasoning trace shown in the UI."""
+    """One tool invocation, for the reasoning trace shown in the UI.
+
+    Three outcomes, not two. A call can succeed (``result``), be rejected
+    before it runs (``error`` -- bad arguments, caught by the schema), or
+    leave neither, which means it ran and its output went missing. Collapsing
+    the last two into "no result" made a correctly blocked call look like a
+    broken one, and a broken one look like a blocked one.
+    """
 
     tool: str
     arguments: dict[str, Any]
     result: ToolResult | None = None
+    error: str | None = None
+
+    @property
+    def rejected(self) -> bool:
+        return self.result is None and self.error is not None
+
+    @property
+    def unverifiable(self) -> bool:
+        return self.result is None and self.error is None
 
 
 @dataclass(slots=True)
@@ -160,26 +177,35 @@ def _explain_arguments(tools: list[Any]) -> Any:
     call was wrong, not what a right one looks like, and the model observed in
     testing would apologise and try the same invented shape again.
 
-    Naming the arguments that do exist turns a dead end into a correction.
+    The tool is identified by name parsed out of the error text rather than by
+    the exception's ``title``: LangChain wraps the pydantic error before it gets
+    here, so the schema name is no longer on it, and an earlier version of this
+    handler therefore never matched and always fell through to a generic
+    message -- doing nothing except look like it was doing something.
     """
-    schemas = {
-        tool.args_schema.__name__: (tool.name, list(tool.args_schema.model_fields))
+    by_name = {
+        tool.name: list(tool.args_schema.model_fields)
         for tool in tools
         if getattr(tool, "args_schema", None) is not None
     }
+    pattern = re.compile(r"tool ['\"](\w+)['\"]")
 
     def handler(error: Exception) -> str:
-        title = getattr(error, "title", "") or ""
-        known = schemas.get(title)
-        if known is None:
-            return f"That tool call failed: {error}"
-        name, fields = known
+        text = str(error)
+        match = pattern.search(text)
+        if match is None:
+            return f"That tool call failed: {text}"
+        name = match.group(1)
+        fields = by_name.get(name)
+        if fields is None:
+            return f"That tool call failed: {text}"
         return (
             f"Your call to `{name}` used arguments it does not have. "
             f"Its only arguments are: {', '.join(fields)}. "
             f"They are flat values, not nested objects -- for example "
             f"min_performance=4.5, not filter={{'performance_score': ...}}. "
-            f"Call it again using those argument names."
+            f"Call it again using only those argument names, or use a different "
+            f"tool if none of them express what you need."
         )
 
     return handler
@@ -307,7 +333,7 @@ def _correction_needed(steps: list[Step], answer: str, question: str) -> str | N
     if ungrounded:
         return correction_for(ungrounded)
 
-    failed = [step for step in steps if step.result is None]
+    failed = [step for step in steps if step.rejected]
     if failed and not any(step.result is not None for step in steps):
         names = ", ".join(sorted({step.tool for step in failed}))
         return (
@@ -349,8 +375,11 @@ def _read_transcript(final: dict[str, Any]) -> tuple[list[Step], str]:
             # results: with none recorded it saw no rows and reported the
             # attack contained, which is a reassuring verdict backed by
             # nothing.
-            if matched is not None and hasattr(artifact, "for_model"):
-                matched.result = artifact
+            if matched is not None:
+                if hasattr(artifact, "for_model"):
+                    matched.result = artifact
+                elif getattr(message, "status", None) == "error":
+                    matched.error = str(message.content)
 
     answer = ""
     for message in reversed(final["messages"]):

@@ -19,6 +19,7 @@ only reports what happened.
 
 from __future__ import annotations
 
+import time
 from typing import Any
 
 import streamlit as st
@@ -34,96 +35,172 @@ from secure_rls.security.context import SecurityContext
 st.set_page_config(
     page_title="Secure RLS Analyst",
     page_icon="🔐",
-    layout="centered",
+    layout="wide",
     initial_sidebar_state="expanded",
 )
 
-#: Streamlit's defaults are fine for a dashboard and wrong for a chat. This
-#: narrows the column, turns the tab strip into a compact pill row, gives the
-#: messages proper bubbles with the user's on the right, and turns the
-#: suggestion buttons into chips sitting just above the pinned input. Selectors
-#: are scoped to Streamlit's stable test ids and to element keys, so they do not
-#: bleed into widgets they were not meant for.
-STYLE = """
+#: One palette, defined once. Streamlit's defaults suit a dashboard; this is a
+#: chat, and it should look like the product it is pretending to be.
+TEAL_DEEP = "#0E5A68"
+TEAL = "#0B7E92"
+CYAN = "#00AECD"
+LIME = "#B9D22C"
+SURFACE = "#F2F7F9"
+BORDER = "#D9E5E9"
+
+#: Selectors are scoped to Streamlit's stable test ids and to element keys
+#: (`st-key-<key>`), so they do not bleed into widgets they were not meant for.
+STYLE = f"""
 <style>
-  [data-testid="stMainBlockContainer"] { max-width: 980px; padding-top: 2.2rem; }
+  :root {{
+      --teal-deep: {TEAL_DEEP};
+      --teal: {TEAL};
+      --cyan: {CYAN};
+      --lime: {LIME};
+      --surface: {SURFACE};
+      --line: {BORDER};
+  }}
 
-  /* the view switcher: a pill row, not a heavy tab strip */
-  [class*="st-key-view_nav"] [role="radiogroup"] { gap: .3rem; }
-  [class*="st-key-view_nav"] label {
+  /* Streamlit's own header is 60px tall and floats over the page, so the
+     content starts below it and the sticky bar parks against it rather than
+     sliding underneath. */
+  [data-testid="stMainBlockContainer"] {{
+      max-width: 1080px;
+      padding-top: 4.4rem;
+  }}
+
+  /* ---- the navigation bar: its own panel, pinned to the top ---- */
+  [class*="st-key-navbar"] {{
+      position: sticky;
+      top: 3.75rem;
+      z-index: 50;
+      background: #fff;
+      border-bottom: 1px solid var(--line);
+      padding: .55rem 0 .5rem 0;
+      margin-bottom: 1.1rem;
+  }}
+  /* The segmented control renders as buttons carrying aria-checked, not as
+     radio inputs, so the selected pill has to be matched on that attribute. */
+  [class*="st-key-navbar"] button[data-variant="segmented_control"] {{
       border-radius: 999px !important;
-      padding: .28rem .95rem !important;
+      padding: .34rem 1.05rem !important;
       font-size: .88rem !important;
-      border: 1px solid rgba(128,128,128,.22) !important;
-  }
+      font-weight: 500 !important;
+      border: 1px solid transparent !important;
+      background: transparent !important;
+      color: var(--teal-deep) !important;
+  }}
+  [class*="st-key-navbar"] button[data-variant="segmented_control"]:hover {{
+      background: var(--surface) !important;
+  }}
+  [class*="st-key-navbar"] button[aria-checked="true"] {{
+      background: var(--teal-deep) !important;
+      border-color: var(--teal-deep) !important;
+      color: #fff !important;
+  }}
+  [class*="st-key-navbar"] button[aria-checked="true"] * {{ color: #fff !important; }}
 
-  /* message bubbles */
-  [data-testid="stChatMessage"] {
+  /* ---- sidebar: model on top, conversations beneath ---- */
+  [data-testid="stSidebar"] {{
+      background: var(--surface);
+      border-right: 1px solid var(--line);
+  }}
+  [data-testid="stSidebar"] h3 {{ color: var(--teal-deep); }}
+  [class*="st-key-chat_"] button {{
+      justify-content: flex-start !important;
+      text-align: left !important;
+      border: none !important;
+      background: transparent !important;
+      color: var(--teal-deep) !important;
+      font-weight: 400 !important;
+      padding: .3rem .55rem !important;
+      min-height: 0 !important;
+      border-radius: 8px !important;
+  }}
+  [class*="st-key-chat_"] button:hover {{ background: rgba(0,174,205,.12) !important; }}
+  [class*="st-key-chat_active"] button {{
+      background: rgba(0,174,205,.18) !important;
+      font-weight: 600 !important;
+  }}
+  [class*="st-key-new_chat"] button {{
+      border-radius: 999px !important;
+      border: 1px solid var(--cyan) !important;
+      color: var(--teal-deep) !important;
+      font-weight: 600 !important;
+  }}
+
+  /* ---- messages ---- */
+  [data-testid="stChatMessage"] {{
       background: transparent;
-      padding: .1rem 0 .5rem 0;
+      padding: .1rem 0 .45rem 0;
       gap: .7rem;
-  }
-  [data-testid="stChatMessage"] [data-testid="stChatMessageContent"] {
-      background: rgba(128,128,128,.07);
-      border: 1px solid rgba(128,128,128,.14);
-      border-radius: 16px;
-      padding: .7rem 1rem;
+  }}
+  [data-testid="stChatMessage"] [data-testid="stChatMessageContent"] {{
+      background: #fff;
+      border: 1px solid var(--line);
+      border-radius: 18px;
+      padding: .75rem 1.05rem;
       flex: 0 1 auto;
       min-width: 0;
-  }
-  /* the assistant's turn carries tables and traces, so it gets the width */
+  }}
   [data-testid="stChatMessage"]:has([data-testid="stChatMessageAvatarAssistant"])
-      [data-testid="stChatMessageContent"] { flex: 1 1 auto; }
-
-  /* the person's own turn, on the right, the way every chat does it.
-     row-reverse flips the main axis, so flex-start packs it to the right. */
-  [data-testid="stChatMessage"]:has([data-testid="stChatMessageAvatarUser"]) {
+      [data-testid="stChatMessageContent"] {{ flex: 1 1 auto; }}
+  [data-testid="stChatMessage"]:has([data-testid="stChatMessageAvatarUser"]) {{
       flex-direction: row-reverse;
       justify-content: flex-start;
-  }
+  }}
   [data-testid="stChatMessage"]:has([data-testid="stChatMessageAvatarUser"])
-      [data-testid="stChatMessageContent"] { max-width: 72%; }
-  [data-testid="stChatMessage"]:has([data-testid="stChatMessageAvatarUser"])
-      [data-testid="stChatMessageContent"] {
-      background: rgba(59,111,181,.10);
-      border-color: rgba(59,111,181,.22);
-  }
+      [data-testid="stChatMessageContent"] {{
+      max-width: 72%;
+      background: var(--teal-deep);
+      border-color: var(--teal-deep);
+      color: #fff;
+  }}
 
-  /* suggestion chips */
-  [class*="st-key-chip_"] button {
+  /* ---- suggestion chips ---- */
+  [class*="st-key-chip_"] button {{
       border-radius: 999px !important;
-      padding: .18rem .8rem !important;
+      padding: .2rem .85rem !important;
       font-size: .8rem !important;
       font-weight: 450 !important;
       min-height: 0 !important;
-      border: 1px solid rgba(128,128,128,.25) !important;
-      background: transparent !important;
-      color: rgba(90,95,105,1) !important;
-  }
-  [class*="st-key-chip_"] button:hover {
-      border-color: rgba(59,111,181,.55) !important;
-      color: #3b6fb5 !important;
-  }
+      border: 1px solid var(--line) !important;
+      background: #fff !important;
+      color: var(--teal) !important;
+  }}
+  [class*="st-key-chip_"] button:hover {{
+      border-color: var(--cyan) !important;
+      background: rgba(0,174,205,.08) !important;
+  }}
 
-  /* the pinned composer */
-  [data-testid="stChatInput"] {
-      border-radius: 16px;
-      border: 1px solid rgba(128,128,128,.25);
-      box-shadow: 0 2px 14px rgba(0,0,0,.05);
-  }
+  /* ---- the composer, as a single rounded pill ---- */
+  [data-testid="stChatInput"] {{
+      border-radius: 999px !important;
+      border: 1px solid var(--line) !important;
+      background: #fff !important;
+      box-shadow: 0 3px 18px rgba(14,90,104,.10);
+      padding: .1rem .35rem .1rem 1rem;
+  }}
+  [data-testid="stChatInput"] textarea {{ padding-top: .55rem !important; }}
+  [data-testid="stChatInputSubmitButton"] {{
+      border-radius: 999px !important;
+      background: var(--cyan) !important;
+      color: #fff !important;
+  }}
+  [data-testid="stBottomBlockContainer"] {{ padding-bottom: 1.1rem; }}
 
-  /* the reasoning trace should read as a footnote, not as a second answer */
-  [data-testid="stExpander"] details {
-      border: 1px solid rgba(128,128,128,.16);
+  /* ---- the reasoning trace reads as a footnote, not a second answer ---- */
+  [data-testid="stExpander"] details {{
+      border: 1px solid var(--line);
       border-radius: 12px;
-      background: rgba(128,128,128,.03);
-  }
-  [data-testid="stExpander"] summary { font-size: .85rem; }
+      background: var(--surface);
+  }}
+  [data-testid="stExpander"] summary {{ font-size: .85rem; }}
+
+  h1, h2, h3, h4 {{ color: var(--teal-deep); }}
 </style>
 """
 
-#: (chip label, question). Short labels: five full questions across one row get
-#: ellipsised into uselessness on anything narrower than a wide desktop.
 SUGGESTIONS = (
     ("Avg salary", "What is the average salary in Engineering?"),
     ("By department", "Which departments have the highest average salary?"),
@@ -168,6 +245,32 @@ def _ask(question: str, ctx: SecurityContext, model: str) -> AgentAnswer:
 # ---------------------------------------------------------------------------
 # Login
 # ---------------------------------------------------------------------------
+
+
+def _chats() -> dict[str, dict[str, Any]]:
+    """Every conversation this session has held.
+
+    Kept in session state and never written to disk. Transcripts contain the
+    tenant's own employee data, and a file on the presenter's laptop is exactly
+    the kind of quiet copy this whole project exists to avoid. Signing out
+    clears them with the rest of the session.
+    """
+    return st.session_state.setdefault("chats", {})
+
+
+def _start_chat() -> str:
+    chat_id = f"c{int(time.time() * 1000)}"
+    _chats()[chat_id] = {"title": "New conversation", "turns": []}
+    st.session_state["current_chat"] = chat_id
+    return chat_id
+
+
+def _current_chat() -> dict[str, Any]:
+    chats = _chats()
+    chat_id = st.session_state.get("current_chat")
+    if chat_id not in chats:
+        chat_id = _start_chat()
+    return chats[chat_id]
 
 
 def login_screen() -> None:
@@ -298,16 +401,17 @@ def chat_view(ctx: SecurityContext, model: str, question: str | None) -> None:
     Streamlit only pins ``chat_input`` to the bottom of the window when it is a
     top-level element. Everything rendered here therefore sits above it.
     """
-    history: list[dict[str, Any]] = st.session_state.setdefault("history", [])
+    chat = _current_chat()
+    turns: list[dict[str, Any]] = chat["turns"]
 
-    if not history and not question:
-        st.markdown(
-            f"#### Ask about {ctx.tenant_id}'s employees\n"
+    if not turns and not question:
+        st.markdown(f"#### Ask about {ctx.tenant_id}'s employees")
+        st.caption(
             "Every answer is computed from the rows you are allowed to see. "
             "Open a step to check the SQL that ran."
         )
 
-    for turn in history:
+    for turn in turns:
         with st.chat_message("user"):
             st.write(turn["question"])
         with st.chat_message("assistant"):
@@ -325,7 +429,13 @@ def chat_view(ctx: SecurityContext, model: str, question: str | None) -> None:
             for chart in answer.charts:
                 render_chart(chart)
             render_trace(answer)
-        history.append({"question": question, "answer": answer})
+        turns.append({"question": question, "answer": answer})
+        if chat["title"] == "New conversation":
+            chat["title"] = question[:42] + ("..." if len(question) > 42 else "")
+            # The sidebar was drawn before this answer existed, so it still
+            # shows the placeholder name. Rerunning costs nothing -- the turn is
+            # already in the transcript and is simply redrawn from it.
+            st.rerun()
 
     _suggestion_chips()
 
@@ -508,12 +618,49 @@ def audit_tab(ctx: SecurityContext) -> None:
 
 
 #: View name -> the icon shown on its pill.
+#: View name -> the icon shown on its pill.
 VIEWS: dict[str, str] = {
     "Chat": "💬",
     "Security": "🛡️",
     "Side by side": "👥",
     "Audit": "📋",
 }
+
+
+def sidebar(ctx: SecurityContext) -> str:
+    """Who you are, which model answers, and every conversation so far."""
+    with st.sidebar:
+        tenant_badge(ctx, db.row_count(ctx))
+        st.divider()
+
+        model = st.selectbox(
+            "Model",
+            list(MODELS),
+            index=list(MODELS).index(DEFAULT_MODEL),
+            help="Swapping the model changes accuracy, not the isolation guarantee.",
+        )
+        spec = MODELS[model]
+        st.caption(f"{spec.origin} · {spec.licence}")
+        st.divider()
+
+        if st.button("＋  New conversation", key="new_chat", use_container_width=True):
+            _start_chat()
+            st.rerun()
+
+        st.caption("Conversations")
+        current = st.session_state.get("current_chat")
+        for chat_id, chat in reversed(list(_chats().items())):
+            active = chat_id == current
+            key = f"chat_active_{chat_id}" if active else f"chat_{chat_id}"
+            if st.button(chat["title"], key=key, use_container_width=True):
+                st.session_state["current_chat"] = chat_id
+                st.rerun()
+
+        st.divider()
+        if st.button("Sign out", use_container_width=True):
+            st.session_state.clear()
+            st.rerun()
+    return model
 
 
 def main() -> None:
@@ -525,36 +672,24 @@ def main() -> None:
         login_screen()
         return
 
-    with st.sidebar:
-        tenant_badge(ctx, db.row_count(ctx))
-        st.divider()
-        model = st.selectbox(
-            "Model",
-            list(MODELS),
-            index=list(MODELS).index(DEFAULT_MODEL),
-            help="Swapping the model changes accuracy, not the isolation guarantee.",
-        )
-        spec = MODELS[model]
-        st.caption(f"{spec.origin}  \nLicence: {spec.licence}  \n{spec.note}")
-        st.divider()
-        if st.button("Sign out", use_container_width=True):
-            st.session_state.clear()
-            st.rerun()
+    _current_chat()  # make sure one exists before the sidebar lists them
+    model = sidebar(ctx)
 
     # One view at a time rather than st.tabs: tabs render every panel, and a
     # chat_input inside one of them is no longer a top-level element, so
     # Streamlit stops pinning it to the bottom of the window.
-    view = (
-        st.segmented_control(
-            "view",
-            list(VIEWS),
-            default="Chat",
-            format_func=lambda name: f"{VIEWS[name]} {name}",
-            label_visibility="collapsed",
-            key="view_nav",
+    with st.container(key="navbar"):
+        view = (
+            st.segmented_control(
+                "view",
+                list(VIEWS),
+                default="Chat",
+                format_func=lambda name: f"{VIEWS[name]} {name}",
+                label_visibility="collapsed",
+                key="view_nav",
+            )
+            or "Chat"
         )
-        or "Chat"
-    )
 
     if view == "Chat":
         question = st.chat_input(f"Ask about {ctx.tenant_id}'s employees")

@@ -161,7 +161,15 @@ def render_trace(answer: AgentAnswer) -> None:
                     "Untrusted content in this result: " + ", ".join(result.flags)
                 )
             if result.rows:
-                st.dataframe(list(result.rows), use_container_width=True, height=220)
+                # Only cap the height once there are enough rows to need
+                # scrolling. A fixed height pads a one-row aggregate out with
+                # blank rows, which reads as missing data rather than as a
+                # single result.
+                st.dataframe(
+                    list(result.rows),
+                    use_container_width=True,
+                    **({"height": 260} if len(result.rows) > 7 else {}),
+                )
             if result.chart:
                 render_chart(result.chart)
 

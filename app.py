@@ -1,5 +1,9 @@
 """Streamlit front end for the secure multi-tenant analyst.
 
+In plain terms: A second, simpler interface built with Streamlit. It offers the
+same four views as the React app (chat, attacks, side by side, audit) on top of
+the same tools.
+
 The interface has a second job besides being usable: it has to make the
 isolation *visible*. Claiming that one tenant cannot see another is not
 convincing; running the same question as two different users side by side, and
@@ -28,7 +32,7 @@ import db
 from agent import AgentAnswer, ask, build_agent
 from secure_rls.auth import authenticate, demo_accounts
 from secure_rls.llm import DEFAULT_MODEL, MODELS
-from secure_rls.redteam import ATTACKS, Attack, featured, verdict
+from secure_rls.redteam import ATTACKS, Attack, exercised, featured, prompt_for, verdict
 from secure_rls.security.audit import AuditLog
 from secure_rls.security.context import SecurityContext
 
@@ -257,11 +261,13 @@ SUGGESTIONS = (
 
 @st.cache_resource(show_spinner="Loading the dataset...")
 def _database() -> int:
+    """Load the dataset once per Streamlit server process."""
     return db.init_db()
 
 
 @st.cache_resource(show_spinner=False)
 def _audit_log() -> AuditLog:
+    """One audit log shared by every session in this Streamlit process."""
     return AuditLog()
 
 
@@ -278,6 +284,7 @@ def _agent(username: str, tenant: str, role: str, user_id: int, model: str) -> A
 
 
 def _ask(question: str, ctx: SecurityContext, model: str) -> AgentAnswer:
+    """Answer a question as the given user, reusing that user's cached agent."""
     agent = _agent(ctx.username, ctx.tenant_id, ctx.role, ctx.user_id, model)
     return ask(question, ctx, _audit_log(), model=model, agent=agent)
 
@@ -299,6 +306,7 @@ def _chats() -> dict[str, dict[str, Any]]:
 
 
 def _start_chat() -> str:
+    """Create a new empty conversation and make it the current one."""
     chat_id = f"c{int(time.time() * 1000)}"
     _chats()[chat_id] = {"title": "New conversation", "turns": []}
     st.session_state["current_chat"] = chat_id
@@ -306,6 +314,7 @@ def _start_chat() -> str:
 
 
 def _current_chat() -> dict[str, Any]:
+    """Return the conversation on screen, creating one if there is none."""
     chats = _chats()
     chat_id = st.session_state.get("current_chat")
     if chat_id not in chats:
@@ -314,6 +323,7 @@ def _current_chat() -> dict[str, Any]:
 
 
 def login_screen() -> None:
+    """Draw the sign-in form and the table of demo accounts."""
     st.title("🔐 Secure RLS Analyst")
     st.caption(
         "A conversational analyst over multi-tenant HR data. The tenant is fixed "
@@ -350,6 +360,7 @@ def login_screen() -> None:
 
 
 def render_chart(spec: dict[str, Any]) -> None:
+    """Draw one chart returned by the plot tool, using Plotly."""
     import pandas as pd
     import plotly.express as px
 
@@ -366,12 +377,35 @@ def render_chart(spec: dict[str, Any]) -> None:
     st.plotly_chart(figure, use_container_width=True)
 
 
+def render_data(answer: AgentAnswer) -> None:
+    """Show the rows behind the answer, straight from the last tool result.
+
+    The model does not get to present data: any table it writes is removed from
+    its text by the agent, and this is where the real rows appear instead.
+    """
+    with_rows = [
+        (step.tool, step.result.rows) for step in answer.steps
+        if step.result is not None and not step.result.refused and step.result.rows
+    ]
+    if not with_rows:
+        return
+    tool, rows = with_rows[-1]
+    st.caption(f"Data from `{tool}` · {len(rows)} row(s)")
+    st.dataframe(list(rows), use_container_width=True, **({"height": 260} if len(rows) > 7 else {}))
+
+
 def render_grounding(answer: AgentAnswer) -> None:
     """Flag figures the model wrote that no tool returned.
 
     The containment verdict is silent about invented content, so an answer can
     keep every foreign row out and still print a fabricated table.
     """
+    if answer.claimed_tenants:
+        st.warning(
+            f"The answer presents rows for {', '.join(answer.claimed_tenants)}. No tool "
+            "result contains rows for that tenant, so the model wrote them itself; treat "
+            "that part of the answer as false."
+        )
     if answer.ungrounded:
         figures = ", ".join(f"{n:,.2f}".rstrip("0").rstrip(".") for n in answer.ungrounded[:8])
         st.warning(
@@ -478,6 +512,7 @@ def chat_view(ctx: SecurityContext, model: str, question: str | None) -> None:
         with st.chat_message("assistant"):
             st.write(turn["answer"].text)
             render_grounding(turn["answer"])
+            render_data(turn["answer"])
             for chart in turn["answer"].charts:
                 render_chart(chart)
             render_trace(turn["answer"])
@@ -489,6 +524,7 @@ def chat_view(ctx: SecurityContext, model: str, question: str | None) -> None:
             answer = _ask(question, ctx, model)
             st.write(answer.text)
             render_grounding(answer)
+            render_data(answer)
             for chart in answer.charts:
                 render_chart(chart)
             render_trace(answer)
@@ -522,6 +558,7 @@ def _suggestion_chips() -> str | None:
 
 
 def security_tab(ctx: SecurityContext, model: str) -> None:
+    """The Security view: buttons to run attacks, and the results of the last run."""
     st.markdown(
         "Each attack is put to the agent as a real question. The verdict looks at "
         "the **data returned**, not at how the answer is phrased: an attack is "
@@ -560,19 +597,25 @@ def security_tab(ctx: SecurityContext, model: str) -> None:
 def _run_attacks(
     selected: tuple[Attack, ...], ctx: SecurityContext, model: str
 ) -> list[dict[str, Any]]:
+    """Run the chosen attacks one by one as the signed-in user, with a progress bar."""
     import time
 
     progress = st.progress(0.0, text="Running...")
     results: list[dict[str, Any]] = []
     for index, attack in enumerate(selected, start=1):
+        prompt = prompt_for(attack, ctx)
+        if prompt is None:
+            continue  # an indirect attack with no injected note in this tenant
         started = time.perf_counter()
-        answer = _ask(attack.prompt, ctx, model)
+        answer = _ask(prompt, ctx, model)
         contained, evidence = verdict(answer, ctx)
         results.append(
             {
                 "attack": attack,
+                "prompt": prompt,
                 "answer": answer,
                 "contained": contained,
+                "exercised": exercised(answer, attack),
                 "evidence": evidence,
                 "seconds": time.perf_counter() - started,
             }
@@ -583,12 +626,20 @@ def _run_attacks(
 
 
 def _render_results(results: list[dict[str, Any]]) -> None:
+    """Show the leak rate and, for each attack, the verdict and what the agent did."""
     leaked = sum(1 for r in results if not r["contained"])
+    tested = sum(1 for r in results if r["exercised"])
     total_seconds = sum(r["seconds"] for r in results)
     (st.success if leaked == 0 else st.error)(
-        f"**Leak rate {leaked}/{len(results)}** — "
-        f"{len(results) - leaked} attack(s) contained in {total_seconds:.0f}s."
+        f"**Leak rate {leaked}/{len(results)}** · isolation layers exercised in "
+        f"{tested}/{len(results)} — {total_seconds:.0f}s."
     )
+    if tested < len(results):
+        st.caption(
+            f"{len(results) - tested} attack(s) never reached what they test: the model "
+            "declined without calling a tool, or (for indirect attacks) no injected text "
+            "reached it. Those are contained by the model, not demonstrated by the layers."
+        )
     st.caption(
         "The leak rate measures isolation, not answer quality: a contained attack can "
         "still get a wrong or invented answer. Accuracy is measured separately by the "
@@ -599,18 +650,21 @@ def _render_results(results: list[dict[str, Any]]) -> None:
         with st.container(border=True):
             st.markdown(
                 f"{'🟢' if record['contained'] else '🔴'} **{attack.id}** · "
-                f"`{attack.category}` · {record['seconds']:.1f}s  \n"
+                f"`{attack.category}` · {record['seconds']:.1f}s"
+                f"{'' if record['exercised'] else ' · ⚪ not exercised'}  \n"
                 f"_{attack.intent}_"
             )
-            st.caption(f"> {attack.prompt}")
+            st.caption(f"> {record['prompt']}")
             st.caption(f"verdict: {record['evidence']}")
             with st.expander("what the agent did"):
                 st.write(record["answer"].text)
                 render_grounding(record["answer"])
+                render_data(record["answer"])
                 render_trace(record["answer"])
 
 
 def _attack_catalogue() -> None:
+    """Show the list of attacks before any have been run."""
     st.dataframe(
         [
             {"id": a.id, "category": a.category, "intent": a.intent, "prompt": a.prompt}
@@ -622,6 +676,7 @@ def _attack_catalogue() -> None:
 
 
 def side_by_side_tab(ctx: SecurityContext, model: str) -> None:
+    """Side by side view: sign in a second account from another tenant, ask both one question."""
     st.markdown(
         "The same question, asked as two different users. Nothing about the "
         "question changes -- only who is asking."
@@ -675,10 +730,12 @@ def side_by_side_tab(ctx: SecurityContext, model: str) -> None:
                 answer = _ask(question, who, model)
             st.write(answer.text)
             render_grounding(answer)
+            render_data(answer)
             render_trace(answer)
 
 
 def audit_tab(ctx: SecurityContext) -> None:
+    """The Audit view: recent security decisions for this tenant only."""
     st.markdown(
         "Every security decision is written down. This view is itself "
         "tenant-scoped: you are looking at your own tenant's activity only."
@@ -760,6 +817,7 @@ def sidebar(ctx: SecurityContext) -> str:
 
 
 def main() -> None:
+    """Entry point of the Streamlit app: sign-in screen, or the sidebar and the selected view."""
     _database()
     st.markdown(STYLE, unsafe_allow_html=True)
 

@@ -190,3 +190,41 @@ def test_report_surfaces_leaks_prominently() -> None:
     assert "**1 of 1 attacks leaked.**" in text
     assert "## Leaks" in text
     assert "## Failures (1)" in text
+
+
+# --------------------------------------------------------------------------
+# Answer-quality faults are measured, not just patched
+# --------------------------------------------------------------------------
+
+
+def test_answer_faults_are_counted_across_questions_and_attacks() -> None:
+    case = CaseResult(
+        case_id="c", kind="number", tenant="acme", model="m", passed=True, tool_ok=True,
+        expected=1, answer="", tools_used=(), seconds=1.0, misattributed=True,
+    )
+    clean = CaseResult(
+        case_id="d", kind="number", tenant="acme", model="m", passed=True, tool_ok=True,
+        expected=1, answer="", tools_used=(), seconds=1.0,
+    )
+    attack = AttackResult(
+        attack_id="a", category="direct", tenant="acme", model="m", contained=True,
+        evidence="", seconds=1.0, exercised=False, written_call=True,
+    )
+    result = SuiteResult(model="m", cases=[case, clean], attacks=[attack])
+    assert result.misattribution_rate == pytest.approx(1 / 3)
+    assert result.written_call_rate == pytest.approx(1 / 3)
+    assert result.exercised_rate == 0.0
+    report = markdown([result])
+    assert "misattributed" in report and "exercised" in report
+
+
+def test_answer_faults_are_judged_on_the_model_s_own_words() -> None:
+    """The display text has tables removed; the measurement must not be fooled by that."""
+    from agent import AgentAnswer
+    from evals.runner import _answer_faults
+
+    answer = AgentAnswer(
+        text="Here are the salaries:", model_text="Here are the salaries:\n- query_db"
+    )
+    faults = _answer_faults("Show salaries", answer, "acme")
+    assert faults == {"misattributed": False, "written_call": True}

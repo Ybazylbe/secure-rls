@@ -1,5 +1,8 @@
 """Semantic search over the free-text ``notes`` column.
 
+In plain terms: Builds and searches a separate vector index of employee notes
+for each tenant, so one tenant's search can never find another tenant's notes.
+
 **One index per tenant, not one index with a filter.**
 
 The usual RAG design is a single vector store where each chunk carries a
@@ -20,6 +23,7 @@ idea, moved down a layer.
 
 from __future__ import annotations
 
+import re
 import threading
 from dataclasses import dataclass
 from pathlib import Path
@@ -51,6 +55,7 @@ def _get_encoder() -> Any:
 
 @dataclass(frozen=True, slots=True)
 class Note:
+    """One employee note, ready to be searched."""
     user_id: int
     name: str
     department: str
@@ -62,11 +67,13 @@ class NoteIndex:
     """A vector index containing exactly one tenant's notes."""
 
     def __init__(self, tenant_id: str, notes: list[Note], vectors: Any) -> None:
+        """Store one tenant's notes and their vectors."""
         self.tenant_id = tenant_id
         self._notes = notes
         self._vectors = vectors
 
     def __len__(self) -> int:
+        """How many notes are in the index."""
         return len(self._notes)
 
     @property
@@ -75,7 +82,25 @@ class NoteIndex:
         for a correctly built index this is always a single-element set."""
         return {note.tenant_id for note in self._notes}
 
-    def search(self, query: str, k: int = 5) -> list[tuple[Note, float]]:
+    def search(
+        self,
+        query: str,
+        k: int = 5,
+        *,
+        name_weight: float | None = None,
+        text_weight: float | None = None,
+    ) -> list[tuple[Note, float]]:
+        """Return the k best-matching notes, with their scores.
+
+        The score is semantic similarity plus a word-match bonus (see
+        _keyword_scores). Meaning alone could not find a named person: asked
+        for "Ravi Sato", it returned five other employees called Sato and
+        ranked Ravi's own note below them, because his note's wording was
+        further from the query than theirs.
+
+        The weights default to the tuned values below; evals/retrieval.py
+        passes zero to measure what semantic search alone would have done.
+        """
         import numpy as np
 
         if not self._notes:
@@ -84,13 +109,55 @@ class NoteIndex:
         vector = encoder.encode(
             [_QUERY_PREFIX + query], normalize_embeddings=True, show_progress_bar=False
         )
-        scores = np.asarray(self._vectors) @ np.asarray(vector).T
-        scores = scores.ravel()
+        semantic = (np.asarray(self._vectors) @ np.asarray(vector).T).ravel()
+        bonus = _keyword_scores(
+            query,
+            self._notes,
+            _NAME_WEIGHT if name_weight is None else name_weight,
+            _TEXT_WEIGHT if text_weight is None else text_weight,
+        )
+        scores = semantic + np.asarray(bonus)
         top = np.argsort(-scores)[: min(k, len(self._notes))]
         return [(self._notes[int(i)], float(scores[int(i)])) for i in top]
 
 
+#: How much an exact word match adds to semantic similarity (which runs 0..1).
+#: A name counts far more than a word in the note text: a person named in the
+#: query is almost certainly the person being asked about.
+_NAME_WEIGHT: Final = 0.5
+_TEXT_WEIGHT: Final = 0.1
+_WORD: Final = re.compile(r"[a-z0-9]+")
+
+
+def _keyword_scores(
+    query: str,
+    notes: list[Note],
+    name_weight: float = _NAME_WEIGHT,
+    text_weight: float = _TEXT_WEIGHT,
+) -> list[float]:
+    """A bonus per note for words it shares with the query.
+
+    In plain terms: this is the "keyword" half of a hybrid search. For each
+    note it adds (a) the share of the employee's name that appears in the query,
+    so "Ravi Sato" scores Ravi Sato 1.0 and Kenji Sato 0.5, and (b) a smaller
+    amount for query words that appear in the note text. A query with no names
+    or shared words gets no bonus, so searching by meaning works as before.
+    """
+    words = {w for w in _WORD.findall(query.lower()) if len(w) > 1}
+    if not words:
+        return [0.0] * len(notes)
+    scores: list[float] = []
+    for note in notes:
+        name = set(_WORD.findall(note.name.lower()))
+        text = set(_WORD.findall(note.text.lower()))
+        name_share = len(name & words) / len(name) if name else 0.0
+        text_share = len(text & words) / len(words)
+        scores.append(name_weight * name_share + text_weight * text_share)
+    return scores
+
+
 def _build(ctx: SecurityContext, db_path: Path | str) -> NoteIndex:
+    """Read one tenant's notes through the guarded connection and embed them into a new index."""
     with tenant_connection(ctx, db_path) as con:
         rows = con.execute(
             f"SELECT user_id, name, department, tenant_id, notes FROM {TENANT_VIEW}"  # noqa: S608

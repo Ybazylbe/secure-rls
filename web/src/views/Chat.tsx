@@ -2,13 +2,16 @@ import { ArrowUp, Bot, Loader2, User } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 
 import { api, type Answer } from "@/api";
+import { Data } from "@/components/Data";
 import { Grounding } from "@/components/Grounding";
 import { Trace } from "@/components/Trace";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 
+/** One question and the agent's answer to it. */
 export type Turn = { question: string; answer: Answer };
 
+/** Example questions shown as buttons above the input box: [button label, question]. */
 const SUGGESTIONS: [string, string][] = [
   ["Avg salary", "What is the average salary in Engineering?"],
   ["By department", "Which departments have the highest average salary?"],
@@ -17,6 +20,7 @@ const SUGGESTIONS: [string, string][] = [
   ["Notes", "Who is flagged as a retention risk in the review notes?"],
 ];
 
+/** The Chat view: the conversation so far, suggested questions, and the input box. */
 export function Chat({
   tenant,
   model,
@@ -37,6 +41,7 @@ export function Chat({
     foot.current?.scrollIntoView({ behavior: "smooth" });
   }, [turns.length, pending]);
 
+  /** Send a question to the agent and add the answer to the conversation. */
   async function send(question: string) {
     if (!question.trim() || pending) return;
     setDraft("");
@@ -71,6 +76,7 @@ export function Chat({
               <p className="whitespace-pre-wrap">{turn.answer.text}</p>
               <div className="space-y-3 pt-3">
                 <Grounding answer={turn.answer} />
+                <Data answer={turn.answer} />
                 <Trace steps={turn.answer.steps} />
               </div>
             </Bubble>
@@ -93,7 +99,7 @@ export function Chat({
         <div ref={foot} />
       </div>
 
-      <div className="space-y-2.5 border-t border-line pt-3">
+      <div className="space-y-2.5 border-t border-line pt-3 pb-6">
         <div className="flex flex-wrap gap-2">
           {SUGGESTIONS.map(([label, question]) => (
             <Button
@@ -131,6 +137,7 @@ export function Chat({
   );
 }
 
+/** One chat bubble, on the right for the user and on the left for the assistant. */
 function Bubble({ side, children }: { side: "user" | "assistant"; children: React.ReactNode }) {
   const mine = side === "user";
   return (

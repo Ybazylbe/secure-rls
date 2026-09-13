@@ -1,5 +1,8 @@
 """Running the evaluation suites and collecting the numbers.
 
+In plain terms: Runs the golden questions and the attacks against the agent and
+collects pass/fail, timing and leak results.
+
 Two suites, answering two different questions:
 
 * **Correctness** -- does the agent give the right answer? Scored against
@@ -27,12 +30,13 @@ from typing import Any
 
 import pandas as pd
 
-from agent import build_agent
+from agent import AgentAnswer, build_agent
 from db import BASE_TABLE, DEFAULT_DB_PATH, admin_connection
 from evals.golden import CASES, Case, matches_name, matches_number
 from secure_rls.auth import USER_IDS
+from secure_rls.grounding import scope_correction, written_tool_call
 from secure_rls.llm import DEFAULT_MODEL
-from secure_rls.redteam import ATTACKS, Attack, verdict
+from secure_rls.redteam import ATTACKS, Attack, exercised, prompt_for, verdict
 from secure_rls.security.audit import AuditLog
 from secure_rls.security.context import TENANTS, SecurityContext
 
@@ -41,6 +45,7 @@ TENANT_USER = {"acme": "alice", "beta": "bob", "gamma": "gita"}
 
 @dataclass(frozen=True, slots=True)
 class CaseResult:
+    """The outcome of one golden question for one tenant and one model."""
     case_id: str
     kind: str
     tenant: str
@@ -55,10 +60,16 @@ class CaseResult:
     #: Whether the grounding check fired, and whether anything survived it.
     retried: bool = False
     ungrounded: int = 0
+    #: The final answer presented the caller's data as another tenant's, or
+    #: answered about another tenant without saying whose data it showed.
+    misattributed: bool = False
+    #: The final answer wrote a tool call or SQL out as text and nothing ran.
+    written_call: bool = False
 
 
 @dataclass(frozen=True, slots=True)
 class AttackResult:
+    """The outcome of one attack for one tenant and one model."""
     attack_id: str
     category: str
     tenant: str
@@ -66,36 +77,46 @@ class AttackResult:
     contained: bool
     evidence: str
     seconds: float
+    #: Whether the attack reached what it tests (see redteam.exercised).
+    exercised: bool = True
+    misattributed: bool = False
+    written_call: bool = False
 
 
 @dataclass(slots=True)
 class SuiteResult:
+    """All question and attack results for one model, with summary numbers."""
     model: str
     cases: list[CaseResult] = field(default_factory=list)
     attacks: list[AttackResult] = field(default_factory=list)
 
     @property
     def accuracy(self) -> float | None:
+        """Share of normal questions answered correctly."""
         scored = [c for c in self.cases if c.kind != "refusal"]
         return _ratio(sum(c.passed for c in scored), len(scored))
 
     @property
     def refusal_accuracy(self) -> float | None:
+        """Share of cross-tenant questions that returned no foreign data."""
         scored = [c for c in self.cases if c.kind == "refusal"]
         return _ratio(sum(c.passed for c in scored), len(scored))
 
     @property
     def tool_accuracy(self) -> float | None:
+        """Share of questions where the agent used a sensible tool."""
         scored = [c for c in self.cases if c.tool_ok is not None]
         return _ratio(sum(bool(c.tool_ok) for c in scored), len(scored))
 
     @property
     def leak_rate(self) -> str:
+        """Attacks that leaked out of attacks run, as text like '0/25'."""
         leaked = sum(not a.contained for a in self.attacks)
         return f"{leaked}/{len(self.attacks)}" if self.attacks else "n/a"
 
     @property
     def leaks(self) -> int:
+        """How many attacks leaked."""
         return sum(not a.contained for a in self.attacks)
 
     @property
@@ -109,10 +130,33 @@ class SuiteResult:
 
     @property
     def retry_rate(self) -> float | None:
+        """Share of answers that needed the one corrective retry."""
         return _ratio(sum(c.retried for c in self.cases), len(self.cases))
 
     @property
+    def misattribution_rate(self) -> float | None:
+        """Share of all answers (questions and attacks) that blurred whose data they showed.
+
+        Lower is better. Measured on the final answer, after the one retry, so
+        it counts what the user would actually have read.
+        """
+        answers: list[CaseResult | AttackResult] = [*self.cases, *self.attacks]
+        return _ratio(sum(a.misattributed for a in answers), len(answers))
+
+    @property
+    def written_call_rate(self) -> float | None:
+        """Share of all answers that wrote a tool call out as text instead of making it."""
+        answers: list[CaseResult | AttackResult] = [*self.cases, *self.attacks]
+        return _ratio(sum(a.written_call for a in answers), len(answers))
+
+    @property
+    def exercised_rate(self) -> float | None:
+        """Share of attacks that reached what they test, rather than being declined."""
+        return _ratio(sum(a.exercised for a in self.attacks), len(self.attacks))
+
+    @property
     def median_seconds(self) -> float:
+        """Median time per question or attack."""
         return self._percentile(50)
 
     @property
@@ -127,14 +171,17 @@ class SuiteResult:
 
     @property
     def mean_seconds(self) -> float:
+        """Average time per question or attack."""
         times = [c.seconds for c in self.cases]
         return sum(times) / len(times) if times else 0.0
 
     @property
     def total_seconds(self) -> float:
+        """Total time spent on the whole suite."""
         return sum(c.seconds for c in self.cases) + sum(a.seconds for a in self.attacks)
 
     def _percentile(self, pct: int) -> float:
+        """Time below which the given percentage of runs finished."""
         times = sorted(c.seconds for c in self.cases)
         if not times:
             return 0.0
@@ -153,10 +200,12 @@ def _ratio(hits: int, total: int) -> float | None:
 
 
 def percent(value: float | None) -> str:
+    """Format a share as a percentage, or 'n/a' if there is nothing to measure."""
     return "n/a" if value is None else f"{value:.0%}"
 
 
 def context_for(tenant: str) -> SecurityContext:
+    """The demo user for a tenant, as the identity the evaluation runs under."""
     username = TENANT_USER[tenant]
     return SecurityContext(
         user_id=USER_IDS[username], username=username, tenant_id=tenant, role="analyst"
@@ -173,6 +222,7 @@ def truth_frame(tenant: str, db_path: Path | str = DEFAULT_DB_PATH) -> pd.DataFr
 
 
 def _score(case: Case, answer_text: str, frame: pd.DataFrame) -> tuple[bool, Any, str]:
+    """Compare one answer with the expected value and say whether it passed."""
     if case.expected is None:
         return False, None, "no expectation"
     expected = case.expected(frame)
@@ -182,6 +232,20 @@ def _score(case: Case, answer_text: str, frame: pd.DataFrame) -> tuple[bool, Any
     return matches_name(answer_text, str(expected)), expected, ""
 
 
+def _answer_faults(question: str, answer: AgentAnswer, tenant: str) -> dict[str, bool]:
+    """The two answer-quality faults seen in demos, checked on the final answer.
+
+    Uses the same checks the agent uses to ask for a rewrite, applied after
+    that rewrite, so a non-zero rate means the fault reached the user.
+    """
+    text = answer.model_text or answer.text
+    nothing_ran = not any(step.result is not None for step in answer.steps)
+    return {
+        "misattributed": scope_correction(question, text, answer.steps, tenant) is not None,
+        "written_call": nothing_ran and written_tool_call(text) is not None,
+    }
+
+
 def run_cases(
     model: str,
     tenants: tuple[str, ...] = TENANTS,
@@ -189,6 +253,7 @@ def run_cases(
     db_path: Path | str = DEFAULT_DB_PATH,
     on_progress: Any = None,
 ) -> list[CaseResult]:
+    """Ask every golden question as each tenant and score the answers."""
     from agent import ask
 
     results: list[CaseResult] = []
@@ -207,7 +272,7 @@ def run_cases(
                 contained, note = verdict(answer, ctx, db_path)
                 passed, expected = contained, "no foreign data"
             else:
-                passed, expected, note = _score(case, answer.text, frame)
+                passed, expected, note = _score(case, answer.model_text or answer.text, frame)
 
             results.append(
                 CaseResult(
@@ -217,6 +282,7 @@ def run_cases(
                     tool_ok=(bool(set(tools_used) & set(case.tools)) if case.tools else None),
                     retried=answer.retried,
                     ungrounded=len(answer.ungrounded),
+                    **_answer_faults(case.question, answer, tenant),
                 )
             )
             if on_progress:
@@ -231,6 +297,7 @@ def run_attacks(
     db_path: Path | str = DEFAULT_DB_PATH,
     on_progress: Any = None,
 ) -> list[AttackResult]:
+    """Put every attack to the agent as each tenant and record the verdict."""
     from agent import ask
 
     results: list[AttackResult] = []
@@ -240,13 +307,18 @@ def run_attacks(
         agent = build_agent(ctx, audit, model=model, db_path=db_path)
         for attack in attacks:
             started = time.perf_counter()
-            answer = ask(attack.prompt, ctx, audit, model=model, db_path=db_path, agent=agent)
+            prompt = prompt_for(attack, ctx, db_path)
+            if prompt is None:
+                continue  # an indirect attack with no injected note in this tenant
+            answer = ask(prompt, ctx, audit, model=model, db_path=db_path, agent=agent)
             contained, evidence = verdict(answer, ctx, db_path)
             results.append(
                 AttackResult(
                     attack_id=attack.id, category=attack.category, tenant=tenant,
                     model=model, contained=contained, evidence=evidence,
                     seconds=time.perf_counter() - started,
+                    exercised=exercised(answer, attack),
+                    **_answer_faults(prompt, answer, tenant),
                 )
             )
             if on_progress:
@@ -264,6 +336,7 @@ def run_suite(
     db_path: Path | str = DEFAULT_DB_PATH,
     on_progress: Any = None,
 ) -> SuiteResult:
+    """Run both the golden questions and the attacks for one model."""
     return SuiteResult(
         model=model,
         cases=run_cases(model, tenants, cases, db_path, on_progress),

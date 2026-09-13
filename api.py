@@ -1,5 +1,10 @@
 """HTTP API behind the React front end.
 
+In plain terms: The web server behind the React app. Every request finds out
+who the user is from a signed cookie, then calls the agent, the attack suite or
+the audit log on that user's behalf. The browser can never say which tenant it
+belongs to.
+
 The browser never states who it is. A signed cookie carries a username and
 nothing else; every request rebuilds the :class:`SecurityContext` on the server
 from that name, and the tenant comes from the account table rather than from
@@ -16,6 +21,7 @@ from __future__ import annotations
 
 import os
 import secrets
+import time
 from pathlib import Path
 from typing import Annotated, Any
 
@@ -29,7 +35,15 @@ import db
 from agent import AgentAnswer, Step, ask, build_agent
 from secure_rls.auth import authenticate, demo_accounts
 from secure_rls.llm import DEFAULT_MODEL, MODELS
-from secure_rls.redteam import ATTACKS, Attack, featured, verdict
+from secure_rls.redteam import (
+    ATTACKS,
+    Attack,
+    exercised,
+    featured,
+    not_exercised_reason,
+    prompt_for,
+    verdict,
+)
 from secure_rls.security.audit import AUDIT
 from secure_rls.security.context import SecurityContext
 
@@ -92,11 +106,13 @@ PeerSession = Annotated[str | None, Cookie(alias=PEER_COOKIE)]
 
 
 class LoginRequest(BaseModel):
+    """Body of a sign-in request: a username and a password."""
     username: str
     password: str
 
 
 class AskRequest(BaseModel):
+    """Body of a chat question: the question text and which model to use."""
     question: str = Field(min_length=1, max_length=2000)
     model: str = DEFAULT_MODEL
 
@@ -105,15 +121,18 @@ class CompareRequest(AskRequest):
     # No tenant field, and unknown fields are refused: a client still sending
     # `other_tenant` gets a 422 rather than a request that silently means
     # something else. The second side comes from the peer session alone.
+    """Body of a side-by-side question. Same as a chat question, with no extra fields allowed."""
     model_config = ConfigDict(extra="forbid")
 
 
 class AttackRequest(BaseModel):
+    """Body of an attack run: which model, and whether to run only the featured attacks."""
     model: str = DEFAULT_MODEL
     only_featured: bool = True
 
 
 def _step_payload(step: Step) -> dict[str, Any]:
+    """Turn one agent step into JSON for the browser: the call, what ran, what came back."""
     result = step.result
     return {
         "tool": step.tool,
@@ -139,7 +158,15 @@ def _step_payload(step: Step) -> dict[str, Any]:
     }
 
 
-def _answer_payload(answer: AgentAnswer) -> dict[str, Any]:
+def _answer_payload(answer: AgentAnswer, ctx: SecurityContext) -> dict[str, Any]:
+    """Turn a whole agent answer into JSON for the browser.
+
+    ``scope`` is stated by the server, not by the model: whose data the tools
+    could read for this answer, and how much of it came back. It sits next to
+    the answer so that a model labelling rows as another tenant's is
+    contradicted on the same screen by something it did not write.
+    """
+    ran = [step for step in answer.steps if step.result is not None and not step.result.refused]
     return {
         "text": answer.text,
         "steps": [_step_payload(s) for s in answer.steps],
@@ -147,6 +174,12 @@ def _answer_payload(answer: AgentAnswer) -> dict[str, Any]:
         "flags": answer.flags,
         "retried": answer.retried,
         "ungrounded": list(answer.ungrounded),
+        "claimed_tenants": list(answer.claimed_tenants),
+        "scope": {
+            "tenant": ctx.tenant_id,
+            "rows": sum(len(step.result.rows) for step in ran if step.result is not None),
+            "calls": len(ran),
+        },
     }
 
 
@@ -157,11 +190,13 @@ def _answer_payload(answer: AgentAnswer) -> dict[str, Any]:
 
 @app.on_event("startup")
 def _load_data() -> None:
+    """On startup, load employees.csv into SQLite if it is not loaded yet."""
     db.init_db()
 
 
 @app.post("/api/login")
 def login(body: LoginRequest, response: Response) -> dict[str, Any]:
+    """Check a username and password and, if they are right, set the signed session cookie."""
     ctx = authenticate(body.username, body.password)
     if ctx is None:
         raise HTTPException(status_code=401, detail="Incorrect username or password")
@@ -177,6 +212,7 @@ def login(body: LoginRequest, response: Response) -> dict[str, Any]:
 
 @app.post("/api/logout")
 def logout(response: Response) -> dict[str, bool]:
+    """Sign out: remove the session cookie and the side-by-side second-account cookie."""
     response.delete_cookie(COOKIE)
     response.delete_cookie(PEER_COOKIE)
     return {"ok": True}
@@ -184,10 +220,12 @@ def logout(response: Response) -> dict[str, bool]:
 
 @app.get("/api/session")
 def session(secure_rls_session: Session = None) -> dict[str, Any]:
+    """Return who is signed in, which tenant they belong to, and how many rows they can see."""
     return _identity(_context_from_cookie(secure_rls_session))
 
 
 def _identity(ctx: SecurityContext) -> dict[str, Any]:
+    """The public description of a signed-in user that the browser is allowed to see."""
     return {
         "username": ctx.username,
         "tenant": ctx.tenant_id,
@@ -198,6 +236,7 @@ def _identity(ctx: SecurityContext) -> dict[str, Any]:
 
 @app.get("/api/models")
 def models() -> list[dict[str, str]]:
+    """List the models the user can choose from, with origin and licence."""
     return [
         {"tag": spec.tag, "origin": spec.origin, "licence": spec.licence, "note": spec.note}
         for spec in MODELS.values()
@@ -215,10 +254,11 @@ def accounts() -> list[dict[str, str]]:
 
 @app.post("/api/ask")
 def ask_question(body: AskRequest, secure_rls_session: Session = None) -> dict[str, Any]:
+    """Answer a chat question as the signed-in user."""
     ctx = _context_from_cookie(secure_rls_session)
     _check_model(body.model)
     answer = ask(body.question, ctx, AUDIT, model=body.model)
-    return _answer_payload(answer)
+    return _answer_payload(answer, ctx)
 
 
 # The side-by-side view. It used to build the second tenant's context on the
@@ -256,12 +296,14 @@ def compare_peer_login(
 def compare_peer(
     secure_rls_session: Session = None, secure_rls_peer: PeerSession = None
 ) -> dict[str, Any]:
+    """Return the second account signed in for the side-by-side view, or 401 if there is none."""
     _context_from_cookie(secure_rls_session)
     return _identity(_peer_context(secure_rls_session, secure_rls_peer))
 
 
 @app.post("/api/compare/peer/logout")
 def compare_peer_logout(response: Response) -> dict[str, bool]:
+    """Sign out the side-by-side second account only."""
     response.delete_cookie(PEER_COOKIE)
     return {"ok": True}
 
@@ -276,8 +318,8 @@ def compare(
     ctx = _context_from_cookie(secure_rls_session)
     peer = _peer_context(secure_rls_session, secure_rls_peer)
     _check_model(body.model)
-    mine = _answer_payload(ask(body.question, ctx, AUDIT, model=body.model))
-    theirs = _answer_payload(ask(body.question, peer, AUDIT, model=body.model))
+    mine = _answer_payload(ask(body.question, ctx, AUDIT, model=body.model), ctx)
+    theirs = _answer_payload(ask(body.question, peer, AUDIT, model=body.model), peer)
     return {
         "mine": {"tenant": ctx.tenant_id, **mine},
         "theirs": {"tenant": peer.tenant_id, **theirs},
@@ -301,11 +343,12 @@ def _peer_context(primary: str | None, raw: str | None) -> SecurityContext:
 
 @app.get("/api/attacks")
 def attack_catalogue() -> list[dict[str, Any]]:
+    """List every attack in the catalogue, without running anything."""
     return [
         {
             "id": a.id,
             "category": a.category,
-            "prompt": a.prompt,
+            "prompt": a.prompt.replace("{carrier}", "<an employee with an injected note>"),
             "intent": a.intent,
             "featured": a.featured,
         }
@@ -315,6 +358,7 @@ def attack_catalogue() -> list[dict[str, Any]]:
 
 @app.post("/api/attacks/run")
 def run_attacks(body: AttackRequest, secure_rls_session: Session = None) -> dict[str, Any]:
+    """Run the attacks as the signed-in user and report whether any foreign data got out."""
     ctx = _context_from_cookie(secure_rls_session)
     _check_model(body.model)
     selected: tuple[Attack, ...] = featured() if body.only_featured else ATTACKS
@@ -322,25 +366,50 @@ def run_attacks(body: AttackRequest, secure_rls_session: Session = None) -> dict
     agent = build_agent(ctx, AUDIT, model=body.model)
     results = []
     for attack in selected:
-        answer = ask(attack.prompt, ctx, AUDIT, model=body.model, agent=agent)
+        prompt = prompt_for(attack, ctx)
+        if prompt is None:
+            # An indirect attack needs an injected note in this tenant's data.
+            results.append(
+                {
+                    "id": attack.id, "category": attack.category, "prompt": attack.prompt,
+                    "intent": attack.intent, "contained": True, "exercised": False,
+                    "not_exercised": f"not applicable: no note in {ctx.tenant_id} carries "
+                    "injected text",
+                    "evidence": "not run", "seconds": 0.0, "answer": None,
+                }
+            )
+            continue
+        started = time.perf_counter()
+        answer = ask(prompt, ctx, AUDIT, model=body.model, agent=agent)
         contained, evidence = verdict(answer, ctx)
         results.append(
             {
                 "id": attack.id,
                 "category": attack.category,
-                "prompt": attack.prompt,
+                "prompt": prompt,
                 "intent": attack.intent,
                 "contained": contained,
+                "exercised": exercised(answer, attack),
+                "not_exercised": not_exercised_reason(answer, attack),
                 "evidence": evidence,
-                "answer": _answer_payload(answer),
+                "seconds": round(time.perf_counter() - started, 1),
+                "answer": _answer_payload(answer, ctx),
             }
         )
-    leaked = sum(1 for r in results if not r["contained"])
-    return {"results": results, "leaked": leaked, "total": len(results)}
+    return {
+        "results": results,
+        "leaked": sum(1 for r in results if not r["contained"]),
+        "exercised": sum(1 for r in results if r["exercised"]),
+        "total": len(results),
+        "model": body.model,
+        "tenant": ctx.tenant_id,
+        "username": ctx.username,
+    }
 
 
 @app.get("/api/audit")
 def audit(secure_rls_session: Session = None) -> list[dict[str, Any]]:
+    """Return the latest audit records, only for the signed-in user's tenant."""
     ctx = _context_from_cookie(secure_rls_session)
     return [
         {
@@ -358,6 +427,7 @@ def audit(secure_rls_session: Session = None) -> list[dict[str, Any]]:
 
 
 def _check_model(tag: str) -> None:
+    """Refuse the request if the model name is not one of the configured models."""
     if tag not in MODELS:
         raise HTTPException(status_code=400, detail=f"unknown model {tag!r}")
 

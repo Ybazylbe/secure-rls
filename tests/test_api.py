@@ -47,7 +47,7 @@ def asked(monkeypatch: pytest.MonkeyPatch) -> list[SecurityContext]:
         )
         return SimpleNamespace(
             text=f"answer for {ctx.tenant_id}", steps=[step], charts=[], flags=[],
-            retried=False, ungrounded=(),
+            retried=False, ungrounded=(), claimed_tenants=(),
         )
 
     monkeypatch.setattr(api, "ask", fake_ask)

@@ -5,6 +5,7 @@ import { Badge } from "@/components/ui/badge";
 import { Disclosure } from "@/components/ui/disclosure";
 import { cn } from "@/lib/utils";
 
+/** Icon, colour and label for each step state. */
 const STATE = {
   ok: { icon: Check, tone: "good", label: "ran" },
   rejected: { icon: Ban, tone: "bad", label: "refused" },
@@ -12,7 +13,14 @@ const STATE = {
   unverifiable: { icon: AlertTriangle, tone: "warn", label: "unverified" },
 } as const;
 
-function Table({ rows }: { rows: Record<string, unknown>[] }) {
+/**
+ * The first 12 rows of a tool result as a table, with a count of the rest.
+ *
+ * `total` is the tool's real row count. The API sends at most 200 rows to the
+ * browser, so counting what arrived reported "188 further rows" for a 450-row
+ * result -- understating it by more than half.
+ */
+export function Table({ rows, total }: { rows: Record<string, unknown>[]; total: number }) {
   const columns = Object.keys(rows[0] ?? {});
   return (
     <div className="overflow-x-auto rounded-lg border border-line">
@@ -38,21 +46,27 @@ function Table({ rows }: { rows: Record<string, unknown>[] }) {
           ))}
         </tbody>
       </table>
-      {rows.length > 12 && (
+      {total > 12 && (
         <p className="px-3 py-1.5 text-[0.75rem] text-ink/50">
-          {rows.length - 12} further rows not shown
+          {total - 12} further rows not shown
+          {total > rows.length && ` (${total} returned in total)`}
         </p>
       )}
     </div>
   );
 }
 
+/** Show numbers with thousands separators and everything else as text. */
 function formatCell(value: unknown) {
   if (value === null || value === undefined) return "";
   if (typeof value === "number") return value.toLocaleString("en-US", { maximumFractionDigits: 2 });
   return String(value);
 }
 
+/**
+ * The reasoning trace under an answer: one expandable block per tool call, showing the
+ * arguments, the SQL that ran (or was refused), what the guard changed, and the rows.
+ */
 export function Trace({ steps }: { steps: Step[] }) {
   if (steps.length === 0) {
     return <p className="text-[0.8rem] text-ink/50">Answered without calling a tool.</p>;
@@ -96,8 +110,11 @@ export function Trace({ steps }: { steps: Step[] }) {
 
             {step.state === "rejected" && (
               <p className="rounded-lg bg-red-50 px-3 py-2 text-[0.8rem] text-red-800">
-                Refused before it ran: the arguments are not ones this tool declares. Nothing
+                Refused before it ran: the arguments did not pass the tool's schema. Nothing
                 executed.
+                {step.error && (
+                  <span className="block pt-1 text-red-800/75">{step.error}</span>
+                )}
               </p>
             )}
             {step.state === "skipped" && (
@@ -149,7 +166,7 @@ export function Trace({ steps }: { steps: Step[] }) {
                 guard: {note}
               </p>
             ))}
-            {step.rows.length > 0 && <Table rows={step.rows} />}
+            {step.rows.length > 0 && <Table rows={step.rows} total={step.row_count} />}
           </Disclosure>
         );
       })}

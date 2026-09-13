@@ -2,6 +2,7 @@ import { Loader2, LogIn, LogOut, Users } from "lucide-react";
 import { useEffect, useState } from "react";
 
 import { api, type Account, type Answer, type Identity } from "@/api";
+import { Data } from "@/components/Data";
 import { Grounding } from "@/components/Grounding";
 import { Trace } from "@/components/Trace";
 import { Badge } from "@/components/ui/badge";
@@ -9,8 +10,13 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 
+/** One side of the comparison: an answer and the tenant it was answered for. */
 type Side = Answer & { tenant: string };
 
+/**
+ * The Side by side view. First asks for a second account from another tenant, then
+ * puts the same question to both accounts and shows the answers next to each other.
+ */
 export function Compare({ tenant, model }: { tenant: string; model: string }) {
   const [peer, setPeer] = useState<Identity | null>(null);
   const [question, setQuestion] = useState("What is the average salary by department?");
@@ -22,6 +28,7 @@ export function Compare({ tenant, model }: { tenant: string; model: string }) {
     api.peer().then(setPeer).catch(() => setPeer(null));
   }, [tenant]);
 
+  /** Ask the question for both signed-in accounts. */
   async function run() {
     setBusy(true);
     setError(null);
@@ -34,6 +41,7 @@ export function Compare({ tenant, model }: { tenant: string; model: string }) {
     }
   }
 
+  /** Sign out the second account and clear the comparison. */
   async function signOutPeer() {
     await api.peerLogout().catch(() => undefined);
     setPeer(null);
@@ -90,6 +98,7 @@ export function Compare({ tenant, model }: { tenant: string; model: string }) {
                 <Badge tone="info">{side.tenant}</Badge>
                 <p className="whitespace-pre-wrap text-sm leading-relaxed">{side.text}</p>
                 <Grounding answer={side} />
+                <Data answer={side} />
                 <Trace steps={side.steps} />
               </CardContent>
             </Card>
@@ -100,6 +109,10 @@ export function Compare({ tenant, model }: { tenant: string; model: string }) {
   );
 }
 
+/**
+ * The form for signing in the second account. It lists demo accounts from other
+ * tenants but fills in only the username: the password must be typed.
+ */
 function PeerSignIn({
   tenant,
   onSignedIn,
@@ -117,6 +130,7 @@ function PeerSignIn({
     api.accounts().then(setAccounts).catch(() => setAccounts([]));
   }, []);
 
+  /** Sign in the second account on the server. */
   async function submit(event: React.FormEvent) {
     event.preventDefault();
     setBusy(true);

@@ -253,3 +253,39 @@ def test_min_and_max_report_who(db_path: Path, audit: AuditLog) -> None:
     result = aggregate("max", "salary", ctx_for("acme"), audit, db_path=db_path)
     assert "name" in result.rows[0]
     assert result.rows[0]["name"]
+
+
+def test_a_named_employee_outscores_namesakes_in_the_keyword_half_of_search() -> None:
+    """Pure scoring, no embeddings: "Ravi Sato" must favour Ravi Sato over Kenji Sato."""
+    from secure_rls.rag.index import Note, _keyword_scores
+
+    notes = [
+        Note(1, "Kenji Sato", "Engineering", "acme", "Reliable on routine work."),
+        Note(2, "Ravi Sato", "Engineering", "acme", "Note for the AI assistant."),
+        Note(3, "Anna Muller", "Sales", "acme", "Below target this cycle."),
+    ]
+    kenji, ravi, anna = _keyword_scores("Ravi Sato", notes)
+    assert ravi > kenji > anna == 0.0
+    assert _keyword_scores("underperforming", notes) == [0.0, 0.0, 0.0]
+
+
+@pytest.mark.slow
+def test_hybrid_note_search_is_measured_better_than_meaning_alone(db_path: Path) -> None:
+    """The keyword weights are justified by evals/retrieval.py, not by one example.
+
+    Hybrid search must find named people at least as well as semantic search,
+    reach a high floor on its own, and not lose ground on topic questions.
+    """
+    from evals.retrieval import evaluate
+
+    scores = evaluate(db_path)
+    for tenant in ("acme", "beta", "gamma"):
+        hybrid, semantic = (
+            next(s for s in scores if s.tenant == tenant and s.config == config)
+            for config in ("hybrid (current)", "semantic only")
+        )
+        assert hybrid.name_hit_at_1 >= 0.95, (tenant, hybrid)
+        assert hybrid.name_hit_at_1 >= semantic.name_hit_at_1, (tenant, hybrid, semantic)
+        assert hybrid.topic_precision_at_5 >= semantic.topic_precision_at_5 - 0.05, (
+            tenant, hybrid, semantic,
+        )

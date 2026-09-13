@@ -23,20 +23,25 @@ def markdown(suites: list[SuiteResult]) -> str:
         "rate uses the same verdict function as the Security tab in the app. "
         "*Grounded* is the share of answers containing no figure that no tool "
         "produced, measured after the agent's one corrective retry; *retried* is "
-        "how often that correction was needed.",
+        "how often that correction was needed. *Misattributed* is the share of "
+        "answers that presented the caller's data as another tenant's, *written "
+        "calls* the share that wrote a tool call out as text instead of making it, "
+        "and *exercised* the share of attacks that reached what they test.",
         "",
         "## Summary",
         "",
         "| model | answer accuracy | refusals correct | tool choice | grounded "
-        "| retried | leak rate | median latency |",
-        "| --- | --- | --- | --- | --- | --- | --- | --- |",
+        "| retried | misattributed | written calls | leak rate | exercised | median latency |",
+        "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
     ]
     for suite in suites:
         lines.append(
             f"| `{suite.model}` | {percent(suite.accuracy)} "
             f"| {percent(suite.refusal_accuracy)} | {percent(suite.tool_accuracy)} "
             f"| {percent(suite.grounded_rate)} | {percent(suite.retry_rate)} "
-            f"| **{suite.leak_rate}** | {suite.median_seconds:.1f}s |"
+            f"| {percent(suite.misattribution_rate)} | {percent(suite.written_call_rate)} "
+            f"| **{suite.leak_rate}** | {percent(suite.exercised_rate)} "
+            f"| {suite.median_seconds:.1f}s |"
         )
 
     lines += ["", "## Isolation", ""]
@@ -115,6 +120,9 @@ def write(suites: list[SuiteResult], out_dir: Path) -> tuple[Path, Path]:
                     "refusal_accuracy": suite.refusal_accuracy,
                     "tool_accuracy": suite.tool_accuracy,
                     "leaks": suite.leaks,
+                    "misattribution_rate": suite.misattribution_rate,
+                    "written_call_rate": suite.written_call_rate,
+                    "exercised_rate": suite.exercised_rate,
                     "attacks": len(suite.attacks),
                     "cases": [asdict(c) for c in suite.cases],
                     "attack_results": [asdict(a) for a in suite.attacks],

@@ -1,5 +1,8 @@
 """Compare the configured models on the same questions, and say which to use.
 
+In plain terms: Runs the full evaluation for several models one after another
+and writes a comparison with a recommendation.
+
 The evaluation suite answers "is this agent correct and does it leak". This
 answers a narrower, more practical question: **given three models that all hold
 the same security guarantee, which one should the product ship with?**
@@ -91,6 +94,7 @@ def benchmark(
     attack_tenants: tuple[str, ...] = ("acme",),
     db_path: Path | str = db.DEFAULT_DB_PATH,
 ) -> tuple[list[SuiteResult], dict[str, float]]:
+    """Run every question and every attack against each model in turn, after a warm-up."""
     suites: list[SuiteResult] = []
     warm: dict[str, float] = {}
     for model in models:
@@ -113,6 +117,7 @@ def benchmark(
 
 
 def _tick(result: CaseResult | AttackResult) -> None:
+    """Print one progress line for a finished question or attack."""
     if isinstance(result, CaseResult):
         mark = "." if result.passed else "F"
         name = result.case_id
@@ -135,6 +140,7 @@ def decide(suites: list[SuiteResult]) -> Verdict:
     def key(suite: SuiteResult) -> tuple[float, float, float]:
         # Higher accuracy first, then faster. Latency is negated so that one
         # sort direction serves both.
+        """Sort key: accuracy first, then correct refusals, then speed."""
         return (suite.accuracy or 0.0, suite.refusal_accuracy or 0.0, -suite.median_seconds)
 
     ranked = sorted(safe, key=key, reverse=True)
@@ -157,6 +163,7 @@ def decide(suites: list[SuiteResult]) -> Verdict:
 
 
 def markdown(suites: list[SuiteResult], warm: dict[str, float]) -> str:
+    """Write the benchmark results as a Markdown report with a recommendation."""
     verdict = decide(suites)
     lines = [
         "# Model benchmark",
@@ -173,16 +180,18 @@ def markdown(suites: list[SuiteResult], warm: dict[str, float]) -> str:
         "",
         f"**{verdict.winner}** — {verdict.reason}.",
         "",
-        "| model | accuracy | refusals | tool choice | grounded | leak rate "
-        "| median | p95 | slowest |",
-        "| --- | --- | --- | --- | --- | --- | --- | --- | --- |",
+        "| model | accuracy | refusals | tool choice | grounded | misattributed "
+        "| written calls | leak rate | exercised | median | p95 | slowest |",
+        "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
     ]
     for suite in suites:
         slowest = max((c.seconds for c in suite.cases), default=0.0)
         lines.append(
             f"| `{suite.model}` | {percent(suite.accuracy)} "
             f"| {percent(suite.refusal_accuracy)} | {percent(suite.tool_accuracy)} "
-            f"| {percent(suite.grounded_rate)} | **{suite.leak_rate}** "
+            f"| {percent(suite.grounded_rate)} | {percent(suite.misattribution_rate)} "
+            f"| {percent(suite.written_call_rate)} | **{suite.leak_rate}** "
+            f"| {percent(suite.exercised_rate)} "
             f"| {suite.median_seconds:.1f}s | {suite.p95_seconds:.1f}s | {slowest:.0f}s |"
         )
 
@@ -215,6 +224,9 @@ def markdown(suites: list[SuiteResult], warm: dict[str, float]) -> str:
         "rank these models on accuracy and speed; it cannot rank them on safety, "
         "because safety here is not theirs to affect.",
         "",
+        "*Misattributed* and *written calls* are answer-quality faults, lower is "
+        "better; *exercised* is the share of attacks that reached what they test.",
+        "",
         "Measured on one machine, one run each. Treat differences under a couple of "
         "points as noise.",
         "",
@@ -223,6 +235,7 @@ def markdown(suites: list[SuiteResult], warm: dict[str, float]) -> str:
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Command line entry point: python -m evals.benchmark."""
     parser = argparse.ArgumentParser(prog="evals.benchmark", description=__doc__)
     parser.add_argument("--models", default="all", help="comma-separated tags, or 'all'")
     parser.add_argument(

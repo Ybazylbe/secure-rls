@@ -1,7 +1,8 @@
-import { CircleCheck, CircleX, Loader2, Play, TriangleAlert } from "lucide-react";
+import { CircleCheck, CircleDashed, CircleX, Loader2, Play, TriangleAlert } from "lucide-react";
 import { useEffect, useState } from "react";
 
-import { api, type AttackRow, type AttackSpec } from "@/api";
+import { api, type AttackRow, type AttackRun, type AttackSpec } from "@/api";
+import { Data } from "@/components/Data";
 import { Grounding } from "@/components/Grounding";
 import { Trace } from "@/components/Trace";
 import { Badge } from "@/components/ui/badge";
@@ -9,26 +10,34 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Disclosure } from "@/components/ui/disclosure";
 
+/**
+ * The Security view: runs attacks against the agent and shows, for each one, whether
+ * another tenant's data got out, whether the database layers were actually reached,
+ * and what the agent did.
+ */
 export function Security({ model }: { model: string }) {
   const [catalogue, setCatalogue] = useState<AttackSpec[]>([]);
-  const [results, setResults] = useState<AttackRow[] | null>(null);
+  const [report, setReport] = useState<AttackRun | null>(null);
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
     api.attacks().then(setCatalogue).catch(() => setCatalogue([]));
   }, []);
 
+  /** Run the featured attacks, or all of them, and keep the report. */
   async function run(onlyFeatured: boolean) {
     setBusy(true);
     try {
-      setResults((await api.runAttacks(model, onlyFeatured)).results);
+      setReport(await api.runAttacks(model, onlyFeatured));
     } finally {
       setBusy(false);
     }
   }
 
   const featured = catalogue.filter((a) => a.featured).length;
-  const leaked = results?.filter((r) => !r.contained).length ?? 0;
+  const results = report?.results ?? null;
+  const leaked = report?.leaked ?? 0;
+  const untested = report ? report.total - report.exercised : 0;
 
   return (
     <div className="space-y-5 py-5">
@@ -65,16 +74,26 @@ export function Security({ model }: { model: string }) {
         </Button>
       </div>
 
-      {results && (
+      {report && (
         <Card className={leaked === 0 ? "border-lime/60 bg-lime/8" : "border-red-300 bg-red-50"}>
-          <CardContent className="pt-4">
+          <CardContent className="space-y-1 pt-4">
             <p className="text-sm font-semibold text-teal-deep">
-              Leak rate {leaked}/{results.length}
+              Leak rate {leaked}/{report.total}
+              <span className="font-normal text-ink/60">
+                {" "}
+                · isolation layers exercised in {report.exercised}/{report.total}
+              </span>
+            </p>
+            <p className="text-[0.78rem] text-ink/50">
+              {report.username} ({report.tenant}) · <code>{report.model}</code> ·{" "}
+              {report.results.reduce((sum, r) => sum + r.seconds, 0).toFixed(0)}s
             </p>
             <p className="pt-0.5 text-[0.82rem] text-ink/60">
-              {leaked === 0
-                ? "Every attack was answered from the signed-in tenant's own data, or refused."
-                : "At least one attack returned data belonging to another tenant."}
+              {leaked > 0
+                ? "At least one attack returned data belonging to another tenant."
+                : "No attack returned another tenant's data."}
+              {untested > 0 &&
+                ` ${untested} attack(s) never reached what they test — the reason is shown on each. Those are contained by the model, not demonstrated by the layers.`}
             </p>
           </CardContent>
         </Card>
@@ -95,6 +114,17 @@ export function Security({ model }: { model: string }) {
                     ))}
                   <code className="text-sm font-medium text-teal-deep">{row.id}</code>
                   <Badge tone="info">{row.category}</Badge>
+                  {outcome && !outcome.exercised && (
+                    <Badge tone="neutral" title={outcome.not_exercised ?? undefined}>
+                      <CircleDashed className="size-3" />
+                      not exercised
+                    </Badge>
+                  )}
+                  {outcome && (
+                    <span className="ml-auto text-[0.75rem] tabular-nums text-ink/45">
+                      {outcome.seconds.toFixed(1)}s
+                    </span>
+                  )}
                 </div>
                 <p className="text-[0.82rem] italic text-ink/55">{row.intent}</p>
                 <p className="rounded-lg bg-surface px-3 py-2 text-[0.82rem] text-ink/75">
@@ -103,17 +133,31 @@ export function Security({ model }: { model: string }) {
                 {outcome && (
                   <>
                     <p className="text-[0.8rem] text-ink/60">verdict: {outcome.evidence}</p>
-                    {outcome.answer.ungrounded.length > 0 && (
+                    {outcome.not_exercised && (
+                      <p className="text-[0.78rem] text-ink/50">
+                        not exercised: {outcome.not_exercised}
+                      </p>
+                    )}
+                    {outcome.answer && outcome.answer.claimed_tenants.length > 0 && (
+                      <Badge tone="warn">
+                        <TriangleAlert className="size-3" />
+                        answer invents rows for {outcome.answer.claimed_tenants.join(", ")}
+                      </Badge>
+                    )}
+                    {outcome.answer && outcome.answer.ungrounded.length > 0 && (
                       <Badge tone="warn">
                         <TriangleAlert className="size-3" />
                         answer contains figures no tool returned
                       </Badge>
                     )}
-                    <Disclosure summary={<span className="text-ink/70">what the agent did</span>}>
-                      <p className="whitespace-pre-wrap text-[0.82rem]">{outcome.answer.text}</p>
-                      <Grounding answer={outcome.answer} />
-                      <Trace steps={outcome.answer.steps} />
-                    </Disclosure>
+                    {outcome.answer && (
+                      <Disclosure summary={<span className="text-ink/70">what the agent did</span>}>
+                        <p className="whitespace-pre-wrap text-[0.82rem]">{outcome.answer.text}</p>
+                        <Grounding answer={outcome.answer} />
+                        <Data answer={outcome.answer} />
+                        <Trace steps={outcome.answer.steps} />
+                      </Disclosure>
+                    )}
                   </>
                 )}
               </CardContent>

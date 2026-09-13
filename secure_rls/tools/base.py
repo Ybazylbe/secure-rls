@@ -1,5 +1,8 @@
 """Shared shapes for the agent's tools.
 
+In plain terms: ToolResult, the common return type of every tool: a short
+version for the model and the full rows for the screen.
+
 Every tool returns a :class:`ToolResult`. It carries two different views of the
 same answer on purpose:
 
@@ -58,11 +61,18 @@ def render_table(rows: tuple[dict[str, Any], ...], limit: int = MODEL_ROW_BUDGET
     ]
     table = "\n".join([header, divider, *body])
     if len(rows) > limit:
-        table += f"\n({len(rows) - limit} further rows not shown)"
+        # Said to the model, not the user: it was observed copying twenty wide
+        # rows into its answer as a markdown table, which took over a minute to
+        # generate and added nothing the trace does not already show.
+        table += (
+            f"\n({len(rows) - limit} further rows not shown. The user sees every row under "
+            f"your answer; summarise this result rather than copying rows into it.)"
+        )
     return table
 
 
 def _cell(value: Any) -> str:
+    """Format one table cell for the model: thousands separators, and long text cut short."""
     if value is None:
         return ""
     if isinstance(value, float):

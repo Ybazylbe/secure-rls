@@ -100,11 +100,16 @@ export const api = {
   models: () => call<ModelSpec[]>("/models"),
   accounts: () => call<Account[]>("/accounts"),
   ask: (question: string, model: string) => post<Answer>("/ask", { question, model }),
-  compare: (question: string, model: string, other_tenant: string) =>
+  // The second side of the comparison is a real sign-in, never a tenant name:
+  // the server only answers for an account whose password this browser gave.
+  peer: () => call<Identity>("/compare/peer"),
+  peerLogin: (username: string, password: string) =>
+    post<Identity>("/compare/peer", { username, password }),
+  peerLogout: () => post<{ ok: boolean }>("/compare/peer/logout"),
+  compare: (question: string, model: string) =>
     post<{ mine: Answer & { tenant: string }; theirs: Answer & { tenant: string } }>("/compare", {
       question,
       model,
-      other_tenant,
     }),
   attacks: () => call<AttackSpec[]>("/attacks"),
   runAttacks: (model: string, onlyFeatured: boolean) =>

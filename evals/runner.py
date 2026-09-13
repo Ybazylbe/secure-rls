@@ -204,7 +204,7 @@ def run_cases(
             tools_used = tuple(step.tool for step in answer.steps)
 
             if case.kind == "refusal":
-                contained, note = verdict(answer, ctx)
+                contained, note = verdict(answer, ctx, db_path)
                 passed, expected = contained, "no foreign data"
             else:
                 passed, expected, note = _score(case, answer.text, frame)
@@ -241,7 +241,7 @@ def run_attacks(
         for attack in attacks:
             started = time.perf_counter()
             answer = ask(attack.prompt, ctx, audit, model=model, db_path=db_path, agent=agent)
-            contained, evidence = verdict(answer, ctx)
+            contained, evidence = verdict(answer, ctx, db_path)
             results.append(
                 AttackResult(
                     attack_id=attack.id, category=attack.category, tenant=tenant,

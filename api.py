@@ -23,7 +23,7 @@ from fastapi import Cookie, FastAPI, HTTPException, Response
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from itsdangerous import BadSignature, URLSafeSerializer
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 import db
 from agent import AgentAnswer, Step, ask, build_agent
@@ -31,7 +31,7 @@ from secure_rls.auth import authenticate, demo_accounts
 from secure_rls.llm import DEFAULT_MODEL, MODELS
 from secure_rls.redteam import ATTACKS, Attack, featured, verdict
 from secure_rls.security.audit import AUDIT
-from secure_rls.security.context import TENANTS, SecurityContext
+from secure_rls.security.context import SecurityContext
 
 #: Sessions are signed, not encrypted -- the cookie's contents are not secret,
 #: its authorship is. Regenerated per process unless pinned, so restarting the
@@ -40,6 +40,12 @@ from secure_rls.security.context import TENANTS, SecurityContext
 SECRET = os.environ.get("SECURE_RLS_SECRET") or secrets.token_urlsafe(32)
 COOKIE = "secure_rls_session"
 _signer = URLSafeSerializer(SECRET, salt="session")
+
+#: The side-by-side view's second account. It is a session in its own right,
+#: established by that account's password, and signed with a different salt so
+#: that neither cookie can be replayed as the other.
+PEER_COOKIE = "secure_rls_peer"
+_peer_signer = URLSafeSerializer(SECRET, salt="peer-session")
 
 STATIC_DIR = Path(__file__).parent / "web" / "dist"
 
@@ -51,18 +57,20 @@ app = FastAPI(title="Secure RLS Analyst", docs_url="/api/docs")
 # ---------------------------------------------------------------------------
 
 
-def _context_from_cookie(raw: str | None) -> SecurityContext:
+def _context_from_cookie(
+    raw: str | None, signer: URLSafeSerializer = _signer, *, what: str = "session"
+) -> SecurityContext:
     """Rebuild the caller's identity, or refuse the request.
 
     The cookie holds a username. The tenant is looked up here, server-side, so
     a client cannot assert one however it edits its own request.
     """
     if not raw:
-        raise HTTPException(status_code=401, detail="not signed in")
+        raise HTTPException(status_code=401, detail=f"not signed in ({what})")
     try:
-        username = str(_signer.loads(raw))
+        username = str(signer.loads(raw))
     except BadSignature as err:
-        raise HTTPException(status_code=401, detail="invalid session") from err
+        raise HTTPException(status_code=401, detail=f"invalid {what}") from err
 
     for name, tenant in demo_accounts():
         if name == username:
@@ -75,6 +83,7 @@ def _context_from_cookie(raw: str | None) -> SecurityContext:
 
 
 Session = Annotated[str | None, Cookie(alias=COOKIE)]
+PeerSession = Annotated[str | None, Cookie(alias=PEER_COOKIE)]
 
 
 # ---------------------------------------------------------------------------
@@ -93,7 +102,10 @@ class AskRequest(BaseModel):
 
 
 class CompareRequest(AskRequest):
-    other_tenant: str
+    # No tenant field, and unknown fields are refused: a client still sending
+    # `other_tenant` gets a 422 rather than a request that silently means
+    # something else. The second side comes from the peer session alone.
+    model_config = ConfigDict(extra="forbid")
 
 
 class AttackRequest(BaseModel):
@@ -166,6 +178,7 @@ def login(body: LoginRequest, response: Response) -> dict[str, Any]:
 @app.post("/api/logout")
 def logout(response: Response) -> dict[str, bool]:
     response.delete_cookie(COOKIE)
+    response.delete_cookie(PEER_COOKIE)
     return {"ok": True}
 
 
@@ -208,34 +221,82 @@ def ask_question(body: AskRequest, secure_rls_session: Session = None) -> dict[s
     return _answer_payload(answer)
 
 
-@app.post("/api/compare")
-def compare(body: CompareRequest, secure_rls_session: Session = None) -> dict[str, Any]:
-    """The same question, as the caller and as another tenant.
+# The side-by-side view. It used to build the second tenant's context on the
+# server from a tenant name in the request and return what that context
+# produced -- which handed any signed-in user another tenant's rows, names and
+# salaries included, while every layer below held perfectly. Now the second side
+# is a real sign-in: the data shown for a tenant goes only to a browser that
+# holds that tenant's password.
 
-    The second context is built here rather than accepted from the client, and
-    only from the closed tenant list -- the endpoint demonstrates isolation, it
-    does not offer a way around it.
-    """
+
+@app.post("/api/compare/peer")
+def compare_peer_login(
+    body: LoginRequest, response: Response, secure_rls_session: Session = None
+) -> dict[str, Any]:
+    """Sign in the second account for the side-by-side view."""
     ctx = _context_from_cookie(secure_rls_session)
-    _check_model(body.model)
-    if body.other_tenant not in TENANTS or body.other_tenant == ctx.tenant_id:
-        raise HTTPException(status_code=400, detail="unknown tenant")
-
-    peer_name = {"acme": "alice", "beta": "bob", "gamma": "gita"}[body.other_tenant]
-    from secure_rls.auth import USER_IDS
-
-    peer = SecurityContext(
-        user_id=USER_IDS[peer_name],
-        username=peer_name,
-        tenant_id=body.other_tenant,
-        role="analyst",
+    peer = authenticate(body.username, body.password)
+    if peer is None:
+        raise HTTPException(status_code=401, detail="Incorrect username or password")
+    if peer.tenant_id == ctx.tenant_id:
+        raise HTTPException(
+            status_code=400, detail="the second account must belong to a different tenant"
+        )
+    response.set_cookie(
+        PEER_COOKIE,
+        _peer_signer.dumps(peer.username),
+        httponly=True,
+        samesite="lax",
+        max_age=8 * 3600,
     )
+    return _identity(peer)
+
+
+@app.get("/api/compare/peer")
+def compare_peer(
+    secure_rls_session: Session = None, secure_rls_peer: PeerSession = None
+) -> dict[str, Any]:
+    _context_from_cookie(secure_rls_session)
+    return _identity(_peer_context(secure_rls_session, secure_rls_peer))
+
+
+@app.post("/api/compare/peer/logout")
+def compare_peer_logout(response: Response) -> dict[str, bool]:
+    response.delete_cookie(PEER_COOKIE)
+    return {"ok": True}
+
+
+@app.post("/api/compare")
+def compare(
+    body: CompareRequest,
+    secure_rls_session: Session = None,
+    secure_rls_peer: PeerSession = None,
+) -> dict[str, Any]:
+    """The same question, answered for two accounts that are both signed in."""
+    ctx = _context_from_cookie(secure_rls_session)
+    peer = _peer_context(secure_rls_session, secure_rls_peer)
+    _check_model(body.model)
     mine = _answer_payload(ask(body.question, ctx, AUDIT, model=body.model))
     theirs = _answer_payload(ask(body.question, peer, AUDIT, model=body.model))
     return {
         "mine": {"tenant": ctx.tenant_id, **mine},
         "theirs": {"tenant": peer.tenant_id, **theirs},
     }
+
+
+def _peer_context(primary: str | None, raw: str | None) -> SecurityContext:
+    """The second account, which must still be a different tenant from the first.
+
+    Checked on every request, not only at sign-in: the primary session can
+    change underneath a peer cookie (sign out, sign in as someone else).
+    """
+    ctx = _context_from_cookie(primary)
+    peer = _context_from_cookie(raw, _peer_signer, what="second account")
+    if peer.tenant_id == ctx.tenant_id:
+        raise HTTPException(
+            status_code=400, detail="the second account must belong to a different tenant"
+        )
+    return peer
 
 
 @app.get("/api/attacks")

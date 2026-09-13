@@ -118,11 +118,28 @@ export function Trace({ steps }: { steps: Step[] }) {
 
             {step.sql && (
               <div className="space-y-1">
-                <p className="flex items-center gap-1.5 text-[0.75rem] font-medium text-ink/60">
-                  <Database className="size-3.5" />
-                  SQL actually executed, after the guard rewrote it
+                {/* A refused statement is shown so the reader can see what was
+                    attempted, but it must not be labelled as executed: that
+                    reads as "the base table was queried" on the attack screen. */}
+                <p
+                  className={cn(
+                    "flex items-center gap-1.5 text-[0.75rem] font-medium",
+                    step.refused ? "text-red-700" : "text-ink/60",
+                  )}
+                >
+                  {step.refused ? <Ban className="size-3.5" /> : <Database className="size-3.5" />}
+                  {step.refused
+                    ? "SQL that was refused — no rows were returned"
+                    : "SQL actually executed, after the guard rewrote it"}
                 </p>
-                <pre className="overflow-x-auto rounded-lg bg-white p-2.5 text-[0.72rem] text-teal-deep">
+                <pre
+                  className={cn(
+                    "overflow-x-auto rounded-lg p-2.5 text-[0.72rem]",
+                    step.refused
+                      ? "bg-red-50/60 text-red-900/70"
+                      : "bg-white text-teal-deep",
+                  )}
+                >
                   {step.sql}
                 </pre>
               </div>

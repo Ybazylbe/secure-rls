@@ -2,6 +2,7 @@ import { ArrowUp, Bot, Loader2, User } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 
 import { api, type Answer } from "@/api";
+import { Grounding } from "@/components/Grounding";
 import { Trace } from "@/components/Trace";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
@@ -68,7 +69,8 @@ export function Chat({
             <Bubble side="user">{turn.question}</Bubble>
             <Bubble side="assistant">
               <p className="whitespace-pre-wrap">{turn.answer.text}</p>
-              <div className="pt-3">
+              <div className="space-y-3 pt-3">
+                <Grounding answer={turn.answer} />
                 <Trace steps={turn.answer.steps} />
               </div>
             </Bubble>

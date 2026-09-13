@@ -366,6 +366,20 @@ def render_chart(spec: dict[str, Any]) -> None:
     st.plotly_chart(figure, use_container_width=True)
 
 
+def render_grounding(answer: AgentAnswer) -> None:
+    """Flag figures the model wrote that no tool returned.
+
+    The containment verdict is silent about invented content, so an answer can
+    keep every foreign row out and still print a fabricated table.
+    """
+    if answer.ungrounded:
+        figures = ", ".join(f"{n:,.2f}".rstrip("0").rstrip(".") for n in answer.ungrounded[:8])
+        st.warning(
+            f"Not from any tool result: {figures}. The model wrote these figures "
+            "itself; treat them as unverified."
+        )
+
+
 def render_trace(answer: AgentAnswer) -> None:
     """The reasoning trace: what the agent did, and what the guard changed."""
     if not answer.steps:
@@ -463,6 +477,7 @@ def chat_view(ctx: SecurityContext, model: str, question: str | None) -> None:
             st.write(turn["question"])
         with st.chat_message("assistant"):
             st.write(turn["answer"].text)
+            render_grounding(turn["answer"])
             for chart in turn["answer"].charts:
                 render_chart(chart)
             render_trace(turn["answer"])
@@ -473,6 +488,7 @@ def chat_view(ctx: SecurityContext, model: str, question: str | None) -> None:
         with st.chat_message("assistant"), st.spinner("Thinking..."):
             answer = _ask(question, ctx, model)
             st.write(answer.text)
+            render_grounding(answer)
             for chart in answer.charts:
                 render_chart(chart)
             render_trace(answer)
@@ -573,6 +589,11 @@ def _render_results(results: list[dict[str, Any]]) -> None:
         f"**Leak rate {leaked}/{len(results)}** — "
         f"{len(results) - leaked} attack(s) contained in {total_seconds:.0f}s."
     )
+    st.caption(
+        "The leak rate measures isolation, not answer quality: a contained attack can "
+        "still get a wrong or invented answer. Accuracy is measured separately by the "
+        "golden question set (`python -m evals`)."
+    )
     for record in results:
         attack: Attack = record["attack"]
         with st.container(border=True):
@@ -585,6 +606,7 @@ def _render_results(results: list[dict[str, Any]]) -> None:
             st.caption(f"verdict: {record['evidence']}")
             with st.expander("what the agent did"):
                 st.write(record["answer"].text)
+                render_grounding(record["answer"])
                 render_trace(record["answer"])
 
 
@@ -604,22 +626,46 @@ def side_by_side_tab(ctx: SecurityContext, model: str) -> None:
         "The same question, asked as two different users. Nothing about the "
         "question changes -- only who is asking."
     )
-    st.caption(
-        "Signing in as the other user is not required: this view builds a second "
-        "context from the demo accounts, exactly as a second browser session would."
-    )
+    # This tab used to build the second tenant's context itself from a tenant
+    # picked in a dropdown, and show that tenant's rows to whoever was signed
+    # in. Every layer held and the data leaked anyway. The second side is now a
+    # real sign-in with that account's own password, kept in this session only.
+    peer: SecurityContext | None = st.session_state.get("peer_ctx")
+    if peer is not None and peer.tenant_id == ctx.tenant_id:
+        st.session_state.pop("peer_ctx")
+        peer = None
+
+    if peer is None:
+        st.caption(
+            "Sign in a second account from another tenant. Its answers are shown "
+            "only because you signed in as it."
+        )
+        with st.form("peer_sign_in"):
+            username = st.text_input("Second account username")
+            password = st.text_input("Password", type="password")
+            submitted = st.form_submit_button("Sign in second account")
+        if submitted:
+            candidate = authenticate(username, password)
+            if candidate is None:
+                st.error("Incorrect username or password.")
+            elif candidate.tenant_id == ctx.tenant_id:
+                st.error("The second account must belong to a different tenant.")
+            else:
+                st.session_state["peer_ctx"] = candidate
+                st.rerun()
+        return
+
+    info, action = st.columns([4, 1])
+    info.caption(f"Comparing `{ctx.tenant_id}` with `{peer.tenant_id}` — {peer.username}")
+    if action.button(f"Sign out {peer.username}"):
+        st.session_state.pop("peer_ctx")
+        st.rerun()
+
     question = st.text_input(
         "Question", value="What is the average salary by department?"
     )
-    others = [t for t in ("acme", "beta", "gamma") if t != ctx.tenant_id]
-    other_tenant = st.selectbox("Compare with tenant", others)
     if not st.button("Ask both", use_container_width=True):
         return
-
-    peer_user = {"acme": ("alice", 1), "beta": ("bob", 3), "gamma": ("gita", 4)}[other_tenant]
-    peer = SecurityContext(
-        user_id=peer_user[1], username=peer_user[0], tenant_id=other_tenant, role="analyst"
-    )
 
     left, right = st.columns(2)
     for column, who in ((left, ctx), (right, peer)):
@@ -628,6 +674,7 @@ def side_by_side_tab(ctx: SecurityContext, model: str) -> None:
             with st.spinner("Thinking..."):
                 answer = _ask(question, who, model)
             st.write(answer.text)
+            render_grounding(answer)
             render_trace(answer)
 
 

@@ -1,7 +1,8 @@
-import { CircleCheck, CircleX, Loader2, Play } from "lucide-react";
+import { CircleCheck, CircleX, Loader2, Play, TriangleAlert } from "lucide-react";
 import { useEffect, useState } from "react";
 
 import { api, type AttackRow, type AttackSpec } from "@/api";
+import { Grounding } from "@/components/Grounding";
 import { Trace } from "@/components/Trace";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -37,7 +38,16 @@ export function Security({ model }: { model: string }) {
           Each attack is put to the agent as a real question. The verdict looks at the{" "}
           <strong className="font-medium text-ink/80">data returned</strong>, not at how the answer
           is phrased: an attack is contained when every row the tools produced belongs to the
-          signed-in tenant.
+          signed-in tenant. Each step is replayed against a copy of the database that holds only
+          that tenant; a result those rows cannot produce counts as a leak, whatever its columns.
+        </p>
+        <p className="max-w-3xl text-sm leading-relaxed text-ink/60">
+          <strong className="font-medium text-ink/80">
+            The leak rate measures isolation, not answer quality.
+          </strong>{" "}
+          A contained attack can still get a wrong or invented answer — for example claiming another
+          tenant has no employees, or presenting your own rows as theirs. Accuracy is measured
+          separately, by the golden question set in <code>python -m evals</code>.
         </p>
         <p className="text-[0.8rem] text-ink/45">
           A local 12B model needs roughly 20–30 seconds per attack, so the full catalogue is a job
@@ -93,8 +103,15 @@ export function Security({ model }: { model: string }) {
                 {outcome && (
                   <>
                     <p className="text-[0.8rem] text-ink/60">verdict: {outcome.evidence}</p>
+                    {outcome.answer.ungrounded.length > 0 && (
+                      <Badge tone="warn">
+                        <TriangleAlert className="size-3" />
+                        answer contains figures no tool returned
+                      </Badge>
+                    )}
                     <Disclosure summary={<span className="text-ink/70">what the agent did</span>}>
                       <p className="whitespace-pre-wrap text-[0.82rem]">{outcome.answer.text}</p>
+                      <Grounding answer={outcome.answer} />
                       <Trace steps={outcome.answer.steps} />
                     </Disclosure>
                   </>

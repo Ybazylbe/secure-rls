@@ -43,7 +43,10 @@ def run_sql(
         with tenant_connection(ctx, db_path, on_deny=denials.append) as con:
             cursor = con.execute(guarded.sql)
             rows = tuple(dict(r) for r in cursor.fetchall())
-    except sqlite3.Error as err:
+    # Before Python 3.12, sqlite3 reports a multi-statement payload as
+    # sqlite3.Warning, which is not a subclass of sqlite3.Error. Catching only
+    # Error would turn that refusal into an unhandled crash on 3.10 and 3.11.
+    except (sqlite3.Error, sqlite3.Warning) as err:
         detail = denials[0] if denials else str(err)
         audit.record(
             ctx, "query_db", "refused", detail=detail, sql=guarded.sql, layer="L3"

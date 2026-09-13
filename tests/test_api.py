@@ -74,7 +74,15 @@ def test_a_tampered_signature_is_refused(client: TestClient) -> None:
     raw = client.cookies[api.COOKIE]
     body, _, signature = raw.rpartition(".")
     flipped = ("a" if signature[0] != "a" else "b") + signature[1:]
+    # Clear first. set() adds a second cookie beside the server's (which is
+    # scoped to the test host) rather than replacing it, and which of the two is
+    # sent depends on jar ordering: on Python 3.10 the valid one went first and
+    # this test passed without ever presenting the tampered signature.
+    client.cookies.clear()
     client.cookies.set(api.COOKIE, f"{body}.{flipped}")
+    assert list(client.cookies.jar) and all(
+        cookie.value.endswith(flipped) for cookie in client.cookies.jar
+    )
     assert client.get("/api/session").status_code == 401
 
 

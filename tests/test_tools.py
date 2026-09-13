@@ -8,6 +8,7 @@ testing the functions directly keeps the security assertions deterministic.
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -73,6 +74,23 @@ def test_sql_tool_reports_a_refusal_instead_of_raising(db_path: Path, audit: Aud
     assert result.refused
     assert "employees_all" in (result.reason or "")
     assert result.for_model().startswith("REFUSED")
+
+
+def test_a_multi_statement_reaching_the_database_is_refused_not_raised(
+    db_path: Path, audit: AuditLog, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """L3 must hold on its own if L4 ever lets a stacked statement through.
+
+    Before Python 3.12 sqlite3 raises ``sqlite3.Warning`` here, outside the
+    ``sqlite3.Error`` hierarchy; CI on 3.10 caught the tool crashing on it.
+    """
+    stacked = "SELECT 1; SELECT * FROM employees_all"
+    monkeypatch.setattr(
+        "secure_rls.tools.query.guard", lambda sql, ctx: SimpleNamespace(sql=stacked)
+    )
+    result = run_sql(stacked, ctx_for("acme"), audit, db_path)
+    assert result.refused
+    assert not result.rows
 
 
 def test_aggregates_differ_between_tenants(db_path: Path, audit: AuditLog) -> None:

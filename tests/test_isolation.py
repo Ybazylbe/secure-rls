@@ -107,9 +107,13 @@ def test_authorizer_blocks_escape_attempts(db_path: Path, sql: str) -> None:
 
 
 def test_multi_statement_payload_is_rejected(db_path: Path) -> None:
-    """``sqlite3`` refuses multiple statements in one ``execute`` call."""
+    """``sqlite3`` refuses multiple statements in one ``execute`` call.
+
+    Python 3.12 raises ``ProgrammingError``; earlier versions raise
+    ``sqlite3.Warning``, which does not derive from ``sqlite3.Error``.
+    """
     with tenant_connection(ctx_for("acme"), db_path) as con:
-        with pytest.raises(sqlite3.Error):
+        with pytest.raises((sqlite3.Error, sqlite3.Warning)):
             con.execute(f"SELECT 1; SELECT * FROM {BASE_TABLE}")
 
 

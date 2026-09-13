@@ -8,11 +8,13 @@ carries an answer.
 from __future__ import annotations
 
 from collections.abc import Iterator
+from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
 
 import api
+from secure_rls.security.context import SecurityContext
 
 
 @pytest.fixture
@@ -92,20 +94,34 @@ def test_a_tampered_signature_is_refused(client: TestClient) -> None:
     assert client.get("/api/session").status_code == 401
 
 
-def test_the_client_cannot_name_its_own_tenant(client: TestClient) -> None:
+def test_the_client_cannot_name_its_own_tenant(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """A tenant in the request body must be ignored, not honoured.
 
     The endpoints take no tenant argument at all, which is the point -- this
     pins it, so that adding one later fails a test rather than passing review.
     """
+    # The agent is replaced so the test needs no model and asserts on the
+    # identity actually handed down, rather than on whatever text came back. An
+    # earlier version called Ollama for real and failed in CI, where none runs.
+    seen: list[SecurityContext] = []
+
+    def fake_ask(question: str, ctx: SecurityContext, *args: object, **kwargs: object) -> object:
+        seen.append(ctx)
+        return SimpleNamespace(
+            text="", steps=[], charts=[], flags=[], retried=False, ungrounded=()
+        )
+
+    monkeypatch.setattr(api, "ask", fake_ask)
     sign_in(client, "bob", "beta-demo-2026")
     response = client.post(
         "/api/ask", json={"question": "hi", "model": "mistral-nemo:12b", "tenant": "acme"}
     )
-    # Rejected for a bad field or accepted and ignored -- never honoured. The
-    # call may fail for want of a model, which is fine: it must not fail
-    # because it decided to serve acme.
-    assert response.status_code != 200 or "acme" not in response.text
+    # Rejected for a bad field, or accepted and ignored -- never honoured.
+    assert response.status_code in (200, 422), response.text
+    if response.status_code == 200:
+        assert [ctx.tenant_id for ctx in seen] == ["beta"]
 
 
 # --------------------------------------------------------------------------

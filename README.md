@@ -10,7 +10,7 @@ rows — and that this is enforced by the database rather than by asking the
 model nicely.
 
 ```
-Leak rate 0/25 on all three models · 92–95% answer accuracy · 100% correct refusals · 271 tests
+Leak rate 0/25 on all three models · 92–95% answer accuracy · 100% correct refusals · 335 tests
 ```
 
 ![architecture](docs/architecture.svg)
@@ -77,7 +77,7 @@ The app has four views.
    `bob`), ask the same question for both, and compare the numbers. The second
    side needs that account's own password: the app will not answer on a
    tenant's behalf because you named it.
-3. **Security.** Run the six featured attacks, or all 25. Each is put to the
+3. **Security.** Run the six featured attacks, or all 26. Each is put to the
    agent as a real question and judged on the data returned — see
    [Measuring a leak](#measuring-a-leak).
 4. **Audit.** Every security decision, with the layer that made it. The view is
@@ -177,7 +177,7 @@ out.
 ## Measuring a leak
 
 The attack catalogue ([`secure_rls/redteam.py`](secure_rls/redteam.py)) holds
-25 attacks in six categories — direct, SQL injection, jailbreak, indirect
+26 attacks in six categories — direct, SQL injection, jailbreak, indirect
 injection, inference, and tooling. The Security view and the evaluation suite
 run the same list through the same `verdict()`, so the number on a demo screen
 and the number in CI are one measurement.
@@ -200,9 +200,31 @@ The second check is what catches results with no identifier at all —
 for a `tenant_id` column and would have scored all three as contained. A result
 that cannot be checked counts as a failure, not a pass.
 
-The leak rate measures isolation and nothing else. A contained attack can still
-be answered badly — "beta has no employees", or the caller's own notes presented
-as beta's. That is an accuracy failure, measured separately below.
+Each result also says whether the attack was **exercised** — whether it reached
+what it tests. An attack the model declines without calling a tool is contained
+by the prompt, not by the layers, and is counted separately. Indirect attacks
+count only when injected text actually reached the model. Three of them make
+sure it does, by looking up an employee in the caller's own tenant whose note
+the injection detector flags and asking about that person by name; a fourth
+asks an ordinary question and reports honestly whether hostile text arrived.
+
+The leak rate measures isolation and nothing else. How the answer reads is a
+separate concern, handled in three ways, strongest first:
+
+1. **The model does not present data.** The rows under an answer come straight
+   from the tool results. Any table the model writes into its own text is
+   replaced by a note, because a copy can mislabel whose rows they are or
+   invent rows outright. A line written by the server, not the model, states
+   whose data the tools read ("Source: acme's data only · 450 rows").
+2. **Unambiguous faults get one rewrite.** An answer that labels data with
+   another tenant, answers about another tenant without saying whose data it
+   shows, or writes a tool call out as text instead of making it is sent back
+   once with the facts. The checks only count explicit signs — tenant names in
+   bare prose ("beta access", "gamma-ray") or everyday words that happen to be
+   tool names ("stats", "plot") do not trigger them.
+3. **Everything is measured.** The evaluation reports how often each fault
+   still reaches the user, and [`tests/fixtures/answers.json`](tests/fixtures/answers.json)
+   keeps every fault and every false alarm seen so far as a regression test.
 
 ## Evaluation and model benchmark
 
@@ -231,10 +253,24 @@ The row that matters is the leak rate, and it is the same for every model.
 The benchmark can rank models on accuracy and speed; it cannot rank them on
 safety, because safety here is not theirs to affect.
 
+The reports also show *misattributed* and *written calls* (answer-quality
+faults that reached the user, lower is better) and *exercised* (attacks that
+reached what they test). Those columns were added after the run above.
+
+Note search has its own measurement, which needs the embedding model but no
+language model. Hybrid search (meaning plus word matches) against meaning
+alone, on this dataset:
+
+| search | name lookup hit@1 | topic precision@5 |
+| --- | --- | --- |
+| hybrid (current) | 100% on every tenant | 83–93% |
+| semantic only | 94–98% | 80–90% |
+
 ```bash
 python -m evals --limit 4                  # smoke run, about a minute
 python -m evals                            # full suite, default model
 python -m evals.benchmark --models all     # the comparison above, about an hour
+python -m evals.retrieval                  # note search, under a minute
 ```
 
 Method, attack categories and the grounding check are described in
@@ -282,7 +318,7 @@ secure_rls/
   oracle.py       independent ground truth for the verdict
   grounding.py    checks that figures in an answer came from a tool
 evals/            golden questions, attack runner, model benchmark
-tests/            271 tests; none needs a model
+tests/            335 tests; none needs a model
 docs/             threat model, evaluation method, benchmark, demo script
 .claude/          project rules, a security-review subagent, two commands, a hook
 ```
@@ -411,7 +447,9 @@ Stated because they are real, not because they are comfortable.
   the next layer, and are not built.
 - **Answers can be wrong without leaking.** Every model fails some questions:
   mistral on filtered counts, qwen on the underperformers question, llama more
-  broadly. Invented figures are flagged, not prevented.
+  broadly. Faults with an unambiguous sign get one rewrite and are measured;
+  a wrong answer with no such sign — a plausible sentence about the wrong
+  people — is only caught by the golden set, not at run time.
 - **Demo conveniences.** `/api/accounts` publishes the demo credentials so the
   sign-in page can list them, and sign-in is not rate-limited. Neither belongs
   in a real deployment.

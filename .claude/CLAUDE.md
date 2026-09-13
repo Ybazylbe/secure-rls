@@ -61,6 +61,11 @@ they were below it:
   database through the code path under test, and replace the agent rather than
   calling Ollama. Three CI failures came from tests that only passed because a
   local `secure_rls.db` or a local model happened to exist.
+- Answer-quality checks (secure_rls/grounding.py) must act only on unambiguous
+  signs, and every fault or false alarm seen in a demo goes into
+  tests/fixtures/answers.json before the check is changed. Tenant names and two
+  tool names are ordinary English words; bare-word matching has already been
+  tried and flagged normal answers.
 - Prefer failing loudly to failing open. Several bugs found in this project
   were silent: a renamed sqlglot argument key that skipped a rewrite, a dropped
   tool argument that removed a filter. Both returned plausible answers.
@@ -79,6 +84,7 @@ npm --prefix web run dev             # React dev server on :5173, proxies /api t
 streamlit run app.py                 # the fallback UI on :8501
 python -m evals --limit 4            # evaluation smoke run
 python -m evals.benchmark --models all   # compare the three models (about an hour)
+python -m evals.retrieval            # note search quality, no language model needed
 ```
 
 Supported Python is 3.10 and 3.12, both in CI. sqlite3 differs between them:

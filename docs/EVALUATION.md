@@ -3,7 +3,7 @@
 Two questions, measured separately, because they fail differently:
 
 - **Does it answer correctly?** 37 questions against all three tenants.
-- **Does it ever leak?** 25 attacks in six categories.
+- **Does it ever leak?** 26 attacks in six categories.
 
 Latest results: [`../evals/results/report.md`](../evals/results/report.md).
 
@@ -86,6 +86,29 @@ than data. Unsupported figures trigger one corrective retry.
 It is a grounding check, not a fact checker. It cannot tell whether the *right*
 number was chosen, only whether the number was seen at all. That is a low bar,
 and the point is that a hallucinated figure does not clear even that.
+
+## Answer-quality faults
+
+Three faults were seen in demos that neither the leak rate nor the golden set
+measured: an answer labelling the caller's rows as another tenant's, an answer
+about another tenant that never said whose data it showed, and a tool call
+written out as text instead of made. They are handled in the product (the
+server shows the data, the model gets one rewrite for unambiguous faults) and
+measured here: every report has a *misattributed* and a *written calls* column,
+computed on the final answer with the same checks the agent uses, and an
+*exercised* column for attacks. A non-zero rate means the fault reached a user.
+
+The checks act only on explicit signs. Tenant names and two of the tool names
+are ordinary English words, and an earlier version that matched bare words
+flagged "Alice has beta access" and "the plot above shows". Every fault and
+every false alarm seen so far is kept in `tests/fixtures/answers.json`.
+
+## Note search
+
+`python -m evals.retrieval` measures `search_notes` on its own, with and without
+the keyword half of the hybrid search: hit@1 when searching for every tenth
+employee by name, and precision@5 on six topic questions. The keyword weights
+are kept only because this run shows them helping on both.
 
 ## Running it
 

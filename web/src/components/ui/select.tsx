@@ -4,9 +4,11 @@ import * as React from "react";
 
 import { cn } from "@/lib/utils";
 
+/** A dropdown (Radix Select). Used for choosing the model. */
 export const Select = SelectPrimitive.Root;
 export const SelectValue = SelectPrimitive.Value;
 
+/** The button that opens the dropdown and shows the current value. */
 export const SelectTrigger = React.forwardRef<
   React.ComponentRef<typeof SelectPrimitive.Trigger>,
   React.ComponentPropsWithoutRef<typeof SelectPrimitive.Trigger>
@@ -28,6 +30,7 @@ export const SelectTrigger = React.forwardRef<
 ));
 SelectTrigger.displayName = "SelectTrigger";
 
+/** The dropdown list itself. */
 export const SelectContent = React.forwardRef<
   React.ComponentRef<typeof SelectPrimitive.Content>,
   React.ComponentPropsWithoutRef<typeof SelectPrimitive.Content>
@@ -50,6 +53,7 @@ export const SelectContent = React.forwardRef<
 ));
 SelectContent.displayName = "SelectContent";
 
+/** One option in the dropdown. */
 export const SelectItem = React.forwardRef<
   React.ComponentRef<typeof SelectPrimitive.Item>,
   React.ComponentPropsWithoutRef<typeof SelectPrimitive.Item>

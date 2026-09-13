@@ -1,5 +1,8 @@
 """Charts as data, not as pictures.
 
+In plain terms: The plot tool: turns the tenant's rows into chart data (bar,
+histogram, box) that the front end draws.
+
 The tool returns a chart *specification* plus the aggregated points. The UI
 renders it. Two reasons: the model never handles an image it cannot check, and
 the numbers behind a chart stay inspectable -- during the demo the same figures

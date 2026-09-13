@@ -5,8 +5,10 @@ import { api, type AuditRow } from "@/api";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 
+/** Badge colour for each audit verdict. */
 const TONE = { allowed: "good", refused: "bad", error: "warn" } as const;
 
+/** The Audit view: the latest security decisions for this tenant, newest first. */
 export function Audit() {
   const [rows, setRows] = useState<AuditRow[]>([]);
   const load = useCallback(() => {

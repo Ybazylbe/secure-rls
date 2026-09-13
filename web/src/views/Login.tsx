@@ -6,6 +6,10 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 
+/**
+ * The sign-in page: a username and password form, and a table of demo accounts
+ * (clicking a row fills the form).
+ */
 export function Login({ onSignedIn }: { onSignedIn: (identity: Identity) => void }) {
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
@@ -17,6 +21,7 @@ export function Login({ onSignedIn }: { onSignedIn: (identity: Identity) => void
     api.accounts().then(setAccounts).catch(() => setAccounts([]));
   }, []);
 
+  /** Send the credentials; on success hand the signed-in identity to the app. */
   async function submit(event: React.FormEvent) {
     event.preventDefault();
     setBusy(true);

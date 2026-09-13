@@ -1,5 +1,9 @@
 """Login: where the tenant is decided, once, for the whole request.
 
+In plain terms: Checks usernames and passwords. On success it creates the
+SecurityContext that fixes which tenant the user belongs to for everything that
+follows.
+
 This is the top of the chain the rest of the system rests on. Everything else
 refuses to take a tenant as a parameter precisely because it is settled here
 and then carried in an immutable :class:`SecurityContext`.
@@ -34,6 +38,7 @@ _hasher: Final = PasswordHasher(time_cost=2, memory_cost=65536, parallelism=2)
 
 @dataclass(frozen=True, slots=True)
 class _User:
+    """One demo account: who it is, its tenant, its role and its password hash."""
     username: str
     tenant_id: str
     role: str

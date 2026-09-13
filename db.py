@@ -1,5 +1,9 @@
 """Storage layer and the physical isolation layer (L2) of the RLS design.
 
+In plain terms: Everything that touches the SQLite file. Loads the CSV, and
+opens the special read-only connection that can only ever see one tenant's
+rows.
+
 The dataset lives in a single multi-tenant table, ``employees_all``. No caller
 outside this module ever names that table:
 

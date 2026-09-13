@@ -1,5 +1,9 @@
 """The kernel layer (L3) of the RLS design: an SQLite authorizer callback.
 
+In plain terms: A callback that SQLite asks before every read or function call.
+It only lets the real table be read through the tenant's own view, and refuses
+everything else.
+
 Layer L2 gives each connection a per-tenant view over the base table. This
 layer makes that view the *only* way in. SQLite invokes the authorizer for
 every object a statement touches, before any row is produced, so the control
@@ -73,6 +77,7 @@ def make_authorizer(
     """
 
     def deny(reason: str) -> int:
+        """Tell the audit hook why, then tell SQLite to refuse."""
         if on_deny is not None:
             on_deny(reason)
         return sqlite3.SQLITE_DENY
@@ -84,6 +89,7 @@ def make_authorizer(
         db_name: str | None,
         source: str | None,
     ) -> int:
+        """Called by SQLite for every action a statement needs. Returns OK or DENY."""
         if action in _ALLOWED_ACTIONS:
             return sqlite3.SQLITE_OK
 

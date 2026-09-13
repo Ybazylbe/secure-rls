@@ -1,5 +1,8 @@
 """Aggregates without SQL.
 
+In plain terms: The stats tool: averages, counts, medians and so on, with
+optional filters, computed with pandas instead of SQL.
+
 Most questions an analyst asks -- average salary by department, headcount, how
 many people clear a performance bar -- do not need a generated query. Serving
 them from a structured tool removes a class of failure: there is no SQL to get
@@ -73,9 +76,11 @@ class Predicate:
     value: float | str
 
     def describe(self) -> str:
+        """The comparison as readable text, for example 'salary >= 100000'."""
         return f"{self.column} {self.operator} {self.value}"
 
     def apply(self, frame: pd.DataFrame) -> pd.DataFrame:
+        """Keep only the rows of the table that match this comparison."""
         series = frame[self.column]
         if self.column == "department":
             # Departments are names, not quantities: only equality makes sense,
@@ -140,6 +145,7 @@ def parse_filter(raw: dict[str, object] | None) -> tuple[Predicate, ...]:
 
 
 def _literal(value: object) -> float | str:
+    """Turn a filter value into a number if it looks like one, otherwise keep it as text."""
     if isinstance(value, (int, float)) and not isinstance(value, bool):
         return float(value)
     text = str(value).strip()
@@ -188,6 +194,7 @@ class Filters:
         )
 
     def describe(self) -> str:
+        """All filters as readable text, or a loud 'ALL employees' when there are none."""
         parts = [f"department {self.department}"] if self.department else []
         parts += [p.describe() for p in self.predicates]
         if not parts:
@@ -200,6 +207,7 @@ class Filters:
         return ", ".join(parts)
 
     def apply(self, frame: pd.DataFrame) -> pd.DataFrame:
+        """Keep only the rows that match every filter."""
         if self.department:
             frame = frame[frame["department"].str.lower() == self.department.lower()]
         for predicate in self.predicates:
@@ -262,6 +270,7 @@ def aggregate(
 def _headcount(
     frame: pd.DataFrame, group_by: str | None, scope: str
 ) -> tuple[tuple[dict[str, object], ...], str]:
+    """Count employees, overall or per group, and describe the result."""
     if group_by:
         counts = frame.groupby(group_by).size().sort_values(ascending=False)
         rows = tuple({group_by: str(k), "employees": int(v)} for k, v in counts.items())
@@ -272,6 +281,7 @@ def _headcount(
 def _grouped(
     frame: pd.DataFrame, metric: str, column: str, group_by: str, scope: str
 ) -> tuple[tuple[dict[str, object], ...], str]:
+    """Compute the metric per group (for example average salary per department)."""
     grouped = frame.groupby(group_by)[column]
     series = (
         grouped.max() - grouped.min() if metric == "spread"
@@ -287,6 +297,7 @@ def _grouped(
 def _scalar(
     frame: pd.DataFrame, metric: str, column: str, scope: str
 ) -> tuple[tuple[dict[str, object], ...], str]:
+    """Compute one number over all matching rows; for min and max, also say who it is."""
     values = frame[column]
     result = (
         values.max() - values.min() if metric == "spread"
@@ -308,5 +319,6 @@ def _scalar(
 
 
 def _number(value: object) -> float | int:
+    """Turn a numpy or pandas number into a plain int or a float rounded to 2 places."""
     number = float(value)  # type: ignore[arg-type]
     return int(number) if number.is_integer() else round(number, 2)

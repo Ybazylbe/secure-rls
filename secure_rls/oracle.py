@@ -1,5 +1,9 @@
 """An independent answer to "whose data is this?", for the containment verdict.
 
+In plain terms: A referee for the attack results. It works out, without
+trusting our own security code, whether any data in an answer could have come
+from another tenant.
+
 The verdict used to look for a ``tenant_id`` column in each returned row and
 skip rows that had none. That failed open: ``SELECT name, salary`` over another
 tenant, an average over the wrong population, or a histogram of foreign
@@ -72,6 +76,7 @@ class Oracle:
     """Ground truth for one caller, built once and reused across steps."""
 
     def __init__(self, ctx: SecurityContext, db_path: Path | str = DEFAULT_DB_PATH) -> None:
+        """Remember the caller and load which tenant owns each user_id."""
         self.ctx = ctx
         self.db_path = Path(db_path)
         with admin_connection(self.db_path) as con:
@@ -83,6 +88,7 @@ class Oracle:
             }
 
     def judge(self, step: Step, isolated: Path | None) -> StepFinding:
+        """Check one step: any foreign rows, and could the caller's own data produce it?"""
         result = step.result
         if result is None or result.refused:
             return StepFinding()
@@ -103,6 +109,7 @@ class Oracle:
         return StepFinding(foreign, unverifiable=f"{step.tool}: no way to check this tool")
 
     def judge_all(self, steps: list[Step]) -> list[StepFinding]:
+        """Check every step, building the caller-only database once if any step needs a replay."""
         needs_replay = any(
             s.tool in REPLAYABLE and s.result is not None and not s.result.refused for s in steps
         )
@@ -114,6 +121,7 @@ class Oracle:
     # -- the two checks -----------------------------------------------------
 
     def _foreign_owners(self, result: ToolResult) -> frozenset[str]:
+        """Tenants other than the caller's that own rows in this result."""
         foreign: set[str] = set()
         for row in _all_rows(result):
             tenant = row.get("tenant_id")
@@ -127,6 +135,7 @@ class Oracle:
         return frozenset(foreign)
 
     def _replay_mismatch(self, step: Step, live_result: ToolResult, isolated: Path) -> str | None:
+        """Run the same tool call on the caller-only database and explain any difference."""
         from secure_rls.tools import build_tools
 
         tools = {tool.name: tool for tool in build_tools(self.ctx, AuditLog(None), isolated)}
@@ -193,6 +202,7 @@ def caller_only_database(
 
 
 def _all_rows(result: ToolResult) -> Iterator[dict[str, Any]]:
+    """Every row a tool result carries, including the data behind a chart."""
     yield from result.rows
     if result.chart:
         for row in result.chart.get("data", ()):
@@ -209,6 +219,7 @@ def _fingerprint(result: ToolResult) -> Counter[tuple[tuple[str, Any], ...]]:
 
 
 def _normalise(value: Any) -> Any:
+    """Make a value comparable: round floats and turn lists and dicts into tuples."""
     if isinstance(value, float):
         return None if math.isnan(value) else round(value, 6)
     if isinstance(value, (list, tuple)):

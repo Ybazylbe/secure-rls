@@ -24,6 +24,7 @@ import {
 } from "@/components/ui/select";
 import { cn } from "@/lib/utils";
 
+/** The four views in the top navigation bar. */
 const VIEWS = [
   { id: "chat", label: "Chat", icon: MessageSquare },
   { id: "security", label: "Security", icon: Shield },
@@ -32,8 +33,13 @@ const VIEWS = [
 ] as const;
 
 type ViewId = (typeof VIEWS)[number]["id"];
+/** One chat conversation kept in the browser: a title and its questions and answers. */
 type Conversation = { id: string; title: string; turns: Turn[] };
 
+/**
+ * The whole app. Shows the sign-in page until a session exists, then the sidebar
+ * (tenant, model, conversations) and whichever of the four views is selected.
+ */
 export default function App() {
   const [identity, setIdentity] = useState<Identity | null>(null);
   const [checked, setChecked] = useState(false);
@@ -64,6 +70,7 @@ export default function App() {
   const spec = models.find((m) => m.tag === model);
   const chat = chats[current] ?? chats[0];
 
+  /** Add a question and its answer to the open conversation; the first question becomes its title. */
   function addTurn(turn: Turn) {
     setChats((previous) =>
       previous.map((conversation, index) =>
@@ -81,6 +88,7 @@ export default function App() {
     );
   }
 
+  /** Sign out on the server, then forget the user and their conversations in the browser. */
   async function signOut() {
     await api.logout().catch(() => undefined);
     setIdentity(null);
@@ -206,6 +214,7 @@ export default function App() {
   );
 }
 
+/** A new, empty conversation. */
 function blank(): Conversation {
   return { id: crypto.randomUUID(), title: "New conversation", turns: [] };
 }

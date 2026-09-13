@@ -1,5 +1,8 @@
 """Column vocabulary shared by the pandas-backed tools.
 
+In plain terms: Lists of column names the pandas-based tools accept, and
+helpers that reject anything else.
+
 The SQL tool gets its safety from the guard and the authorizer. These tools
 never build SQL at all -- they operate on the tenant's DataFrame, which
 :func:`db.tenant_frame` has already restricted. What they still need is a
@@ -22,6 +25,7 @@ class ColumnError(ValueError):
 
 
 def check_numeric(column: str) -> str:
+    """Return the column if it is numeric; otherwise raise ColumnError."""
     if column not in NUMERIC_COLUMNS:
         raise ColumnError(
             f"{column!r} is not a numeric column; choose one of "
@@ -31,6 +35,7 @@ def check_numeric(column: str) -> str:
 
 
 def check_groupable(column: str) -> str:
+    """Return the column if results can be grouped by it; otherwise raise ColumnError."""
     if column not in GROUPABLE_COLUMNS:
         raise ColumnError(
             f"cannot group by {column!r}; groupable columns are "

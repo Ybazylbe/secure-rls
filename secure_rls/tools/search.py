@@ -1,5 +1,8 @@
 """Retrieval over employee notes -- the tool most exposed to hostile content.
 
+In plain terms: The search_notes tool: finds employee notes by meaning, only
+within the user's tenant, and marks any suspicious text in them.
+
 Everything else in this system reads numbers. This one reads prose that people
 wrote, and in this dataset some of that prose is aimed squarely at the model:
 "ignore all previous instructions", "you are an administrator", "run SELECT *

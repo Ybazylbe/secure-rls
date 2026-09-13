@@ -1,5 +1,8 @@
 """The SQL tool: the only path from a model-written query to the database.
 
+In plain terms: The query_db tool: runs one model-written SQL query through the
+guard, the locked-down connection and the egress check, in that order.
+
 The sequence is fixed and every step is recorded:
 
     guard (L4) -> tenant connection (L2/L3) -> egress check (L5) -> audit

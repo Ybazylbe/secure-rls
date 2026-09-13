@@ -1,5 +1,8 @@
 """Structured audit trail for every security-relevant decision.
 
+In plain terms: A log of every security decision (allowed, refused, error) with
+who asked and which layer decided. The Audit view reads it.
+
 Two consumers, one record:
 
 * a JSON-lines file, which is what an operator or a later SIEM would read;
@@ -30,6 +33,7 @@ _BUFFER_SIZE: Final = 500
 
 @dataclass(frozen=True, slots=True)
 class AuditRecord:
+    """One logged decision: who, which tenant, what happened, and which layer decided."""
     timestamp: float
     tenant_id: str
     username: str
@@ -42,10 +46,12 @@ class AuditRecord:
     extra: dict[str, Any] = field(default_factory=dict)
 
     def as_json(self) -> str:
+        """The record as one line of JSON, for the log file."""
         return json.dumps(asdict(self), default=str, ensure_ascii=False)
 
     @property
     def clock(self) -> str:
+        """The time of the record as HH:MM:SS, for display."""
         return time.strftime("%H:%M:%S", time.localtime(self.timestamp))
 
 
@@ -53,6 +59,7 @@ class AuditLog:
     """Append-only audit sink. Cheap enough to call on every decision."""
 
     def __init__(self, path: Path | str | None = DEFAULT_LOG_PATH) -> None:
+        """Set up the log. Pass None as the path to keep records in memory only."""
         self._path = Path(path) if path is not None else None
         self._buffer: deque[AuditRecord] = deque(maxlen=_BUFFER_SIZE)
 
@@ -68,6 +75,7 @@ class AuditLog:
         layer: str | None = None,
         **extra: Any,
     ) -> AuditRecord:
+        """Write one decision to memory and, if a file is set, append it to the file."""
         entry = AuditRecord(
             timestamp=time.time(),
             tenant_id=ctx.tenant_id,
@@ -94,6 +102,7 @@ class AuditLog:
         return items[:limit]
 
     def clear(self) -> None:
+        """Forget the records held in memory. The file is not touched."""
         self._buffer.clear()
 
 

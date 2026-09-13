@@ -1,5 +1,9 @@
 """The egress layer (L5): check what is about to leave, not just what goes in.
 
+In plain terms: A last check on the way out: refuse any result that contains
+another tenant's tenant_id. Also marks suspicious text in employee notes so the
+model treats it as data, not orders.
+
 Layers L2-L4 are preventive. This one is detective: it inspects every result
 set on its way back to the agent and refuses to pass on anything belonging to
 another tenant. In a correct system it never fires -- which is exactly why it
@@ -32,12 +36,14 @@ class EgressViolation(RuntimeError):
     """
 
     def __init__(self, reason: str, *, offending: Sequence[str] = ()) -> None:
+        """Keep the reason and the foreign tenants that were found."""
         super().__init__(reason)
         self.reason = reason
         self.offending = tuple(offending)
 
 
 def _as_mapping(row: Any) -> Mapping[str, Any] | None:
+    """Treat a row as a dict if possible (dict or sqlite3.Row); otherwise return None."""
     if isinstance(row, Mapping):
         return row
     keys = getattr(row, "keys", None)

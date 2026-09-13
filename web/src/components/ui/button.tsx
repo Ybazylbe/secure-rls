@@ -34,6 +34,7 @@ export interface ButtonProps
   asChild?: boolean;
 }
 
+/** A button in one of the app's styles (primary, outline, ghost, accent) and sizes. */
 export const Button = React.forwardRef<HTMLButtonElement, ButtonProps>(
   ({ className, variant, size, asChild = false, ...props }, ref) => {
     const Comp = asChild ? Slot : "button";

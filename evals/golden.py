@@ -1,5 +1,8 @@
 """The golden question set, with ground truth computed independently.
 
+In plain terms: The test questions, each with its correct answer computed
+directly from the data.
+
 Every expected answer is derived from the tenant's DataFrame by a small pandas
 expression written here, not by reading what the agent produced and blessing
 it. That distinction is the whole point: an expectation copied from a previous
@@ -42,22 +45,27 @@ class Case:
 
 
 def _top_department(frame: pd.DataFrame) -> str:
+    """The department with the highest average salary."""
     return str(frame.groupby("department")["salary"].mean().idxmax())
 
 
 def _bottom_department(frame: pd.DataFrame) -> str:
+    """The department with the lowest average salary."""
     return str(frame.groupby("department")["salary"].mean().idxmin())
 
 
 def _largest_department(frame: pd.DataFrame) -> str:
+    """The department with the most employees."""
     return str(frame["department"].value_counts().idxmax())
 
 
 def _best_performer(frame: pd.DataFrame) -> str:
+    """The name of the employee with the highest performance score."""
     return str(frame.loc[frame["performance_score"].idxmax(), "name"])
 
 
 def _highest_paid(frame: pd.DataFrame) -> str:
+    """The name of the employee with the highest salary."""
     return str(frame.loc[frame["salary"].idxmax(), "name"])
 
 

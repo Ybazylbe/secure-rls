@@ -1,5 +1,9 @@
 """The validation layer (L4): parse, vet and rewrite model-generated SQL.
 
+In plain terms: Checks the SQL the model wrote before it runs: one SELECT only,
+only the employees table, only safe functions. Then it adds "tenant_id = <your
+tenant>" and a 500-row limit.
+
 Layers L2 and L3 already make unauthorised reads impossible. This layer exists
 for three other reasons:
 
@@ -69,6 +73,7 @@ class SqlGuardError(ValueError):
     """A model-generated statement was refused before execution."""
 
     def __init__(self, reason: str, *, sql: str = "") -> None:
+        """Keep a reason that is safe to show to the user, and the SQL that caused it."""
         super().__init__(reason)
         self.reason = reason
         self.sql = sql
@@ -84,6 +89,7 @@ class GuardedQuery:
 
     @property
     def was_rewritten(self) -> bool:
+        """True if the guard changed the query (it almost always adds the tenant filter)."""
         return bool(self.rewrites)
 
 
@@ -152,6 +158,7 @@ def _parse_single(sql: str) -> exp.Expression:
 
 
 def _reject_forbidden_nodes(statement: exp.Expression, sql: str) -> None:
+    """Refuse the query if a write, DDL, PRAGMA, ATTACH or similar appears anywhere in it."""
     for node in statement.walk():
         if isinstance(node, _FORBIDDEN_NODES):
             raise SqlGuardError(
@@ -165,10 +172,12 @@ def _reject_forbidden_nodes(statement: exp.Expression, sql: str) -> None:
 
 
 def _cte_names(statement: exp.Expression) -> frozenset[str]:
+    """Names the query defines with WITH ... AS; these may be used like tables."""
     return frozenset(cte.alias_or_name.lower() for cte in statement.find_all(exp.CTE))
 
 
 def _check_tables(statement: exp.Expression, cte_names: frozenset[str], sql: str) -> None:
+    """Refuse any table except 'employees' or a WITH name, and any schema prefix."""
     for table in statement.find_all(exp.Table):
         name = table.name.lower()
         if name in cte_names or name in ALLOWED_TABLES:
@@ -237,6 +246,7 @@ def _function_name(node: exp.Func) -> str:
 
 
 def _check_functions(statement: exp.Expression, sql: str) -> None:
+    """Refuse any SQL function that is not on the allowlist."""
     for node in statement.find_all(exp.Func):
         if isinstance(node, _SYNTAX_NODES):
             continue
@@ -324,6 +334,7 @@ def _apply_tenant_predicate(
 
 
 def _apply_row_cap(statement: exp.Expression, max_rows: int, rewrites: list[str]) -> None:
+    """Add LIMIT 500, or lower a larger LIMIT to 500."""
     limit = statement.args.get("limit")
     current: int | None = None
     if isinstance(limit, exp.Limit):

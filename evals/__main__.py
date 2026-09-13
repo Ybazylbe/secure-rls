@@ -31,6 +31,7 @@ from secure_rls.security.context import TENANTS
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Parse the command line, run the chosen suites for each model, and write the report."""
     parser = argparse.ArgumentParser(prog="evals", description=__doc__)
     parser.add_argument("--models", default=DEFAULT_MODEL,
                         help="comma-separated model tags, or 'all'")
@@ -85,11 +86,13 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def _case_progress(result: CaseResult) -> None:
+    """Print one line per finished question: a dot if it passed, F if it failed."""
     mark = "." if result.passed else "F"
     print(f"  {mark} {result.tenant:5s} {result.case_id:28s} {result.seconds:5.1f}s", flush=True)
 
 
 def _attack_progress(result: AttackResult) -> None:
+    """Print one line per finished attack: a dot if contained, LEAK if not."""
     mark = "." if result.contained else "LEAK"
     print(
         f"  {mark} {result.tenant:5s} {result.attack_id:28s} {result.seconds:5.1f}s",

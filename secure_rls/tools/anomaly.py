@@ -1,5 +1,8 @@
 """Outlier detection, scoped to the caller's own population.
 
+In plain terms: The detect_anomalies tool: finds employees whose salary or
+score is unusual compared with colleagues in the same department and tenant.
+
 The scoping is the interesting part. "Who is paid unusually?" is only
 meaningful relative to a peer group, and the peer group here must be the
 caller's tenant -- the dataset gives each tenant a different pay scale on
@@ -90,5 +93,6 @@ def detect_anomalies(
 
 
 def _number(value: object) -> float | int:
+    """Turn a numpy or pandas number into a plain int or a float rounded to 2 places."""
     number = float(value)  # type: ignore[arg-type]
     return int(number) if number.is_integer() else round(number, 2)

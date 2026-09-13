@@ -3,6 +3,7 @@ import type * as React from "react";
 
 import { cn } from "@/lib/utils";
 
+/** Colour variants for badges. */
 const badge = cva(
   "inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[0.72rem] font-medium",
   {
@@ -19,6 +20,7 @@ const badge = cva(
   },
 );
 
+/** A small rounded label, coloured by tone (good, bad, warn, info, neutral). */
 export function Badge({
   className,
   tone,

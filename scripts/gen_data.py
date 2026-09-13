@@ -1,5 +1,8 @@
 """Generate the synthetic multi-tenant HR dataset (``employees.csv``).
 
+In plain terms: Creates employees.csv: 1000 fake employees in three tenants,
+with a few planted salary outliers and planted prompt-injection notes.
+
 Deterministic by design: a fixed seed keeps the golden evaluation answers in
 ``evals/`` stable across runs, so a change in accuracy means the agent changed,
 not the data.
@@ -120,6 +123,7 @@ HIRE_END: Final = date(2025, 12, 31)
 
 
 def _weighted_keys(mapping: Mapping[str, tuple[float, ...]]) -> tuple[list[str], list[float]]:
+    """Split a mapping into its keys and the first number of each value, for random.choices."""
     return list(mapping), [v[0] for v in mapping.values()]
 
 
@@ -132,11 +136,13 @@ def _performance(rng: random.Random) -> float:
 
 
 def _note(rng: random.Random, dept: str, score: float) -> str:
+    """Pick a review note that matches the employee's performance band."""
     band = "high" if score >= 4.2 else "low" if score < 3.0 else "mid"
     return rng.choice(NOTE_TEMPLATES[band]).format(dept=dept)
 
 
 def generate(total: int = TOTAL_ROWS, seed: int = SEED) -> list[dict[str, object]]:
+    """Build the whole dataset in memory: same seed, same rows, every time."""
     rng = random.Random(seed)
     dept_names, dept_weights = _weighted_keys(DEPARTMENTS)
 
@@ -210,6 +216,7 @@ FIELDS: Final = [
 
 
 def write_csv(rows: list[dict[str, object]], path: Path) -> None:
+    """Write the rows to a CSV file with the expected column order."""
     with path.open("w", newline="", encoding="utf-8") as fh:
         writer = csv.DictWriter(fh, fieldnames=FIELDS)
         writer.writeheader()
@@ -217,6 +224,7 @@ def write_csv(rows: list[dict[str, object]], path: Path) -> None:
 
 
 def main() -> None:
+    """Command line entry point: generate the data and write employees.csv."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--out", type=Path, default=Path("employees.csv"))
     parser.add_argument("--rows", type=int, default=TOTAL_ROWS)

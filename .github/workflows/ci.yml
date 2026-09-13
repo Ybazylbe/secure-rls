@@ -37,7 +37,9 @@ jobs:
             tests/test_sql_guard.py \
             tests/test_egress.py \
             tests/test_tools.py \
-            tests/test_auth.py
+            tests/test_auth.py \
+            tests/test_api.py \
+            tests/test_verdict.py
 
   tests:
     name: Tests (py${{ matrix.python }})

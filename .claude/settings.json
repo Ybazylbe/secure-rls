@@ -2,12 +2,12 @@
   "hooks": {
     "PostToolUse": [
       {
-        "matcher": "Edit|Write",
+        "matcher": "Edit|Write|MultiEdit",
         "hooks": [
           {
             "type": "command",
-            "command": "changed=$(cat | python3 -c \"import json,sys; print(json.load(sys.stdin).get('tool_input',{}).get('file_path',''))\"); case \"$changed\" in *secure_rls/security/*|*/db.py|db.py) echo 'Security layer touched - running the isolation tests'; python -m pytest -q -m 'not slow' tests/test_isolation.py tests/test_sql_guard.py tests/test_egress.py ;; esac",
-            "timeout": 120
+            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/isolation-tests.sh\"",
+            "timeout": 180
           }
         ]
       }

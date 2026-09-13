@@ -17,14 +17,34 @@ Isolation is enforced by five layers, none of which is the prompt:
 | L4 validation | `secure_rls/security/sql_guard.py` | sqlglot AST checks and tenant-predicate injection |
 | L5 egress | `secure_rls/security/egress.py` | refuses any result carrying a foreign tenant id |
 
-`agent.py`, `app.py` and everything in `secure_rls/tools/` sit **above** this
-line and are not security-critical. The prompt is defence in depth, never a
-control.
+`agent.py`, the React front end in `web/` and the tool *implementations* sit
+**above** this line and are not security-critical. The prompt is defence in
+depth, never a control.
+
+Three places above the line still carry a security claim, and are treated as if
+they were below it:
+
+- **`api.py` and `secure_rls/auth.py` decide who the caller is.** The API must
+  build the `SecurityContext` from the signed session and nothing else. An
+  endpoint that constructs a context for a *different* tenant and returns what
+  it produced hands that tenant's data to the caller -- every layer below then
+  holds perfectly and the data leaks anyway. `/api/compare` and the Streamlit
+  side-by-side tab once did exactly this; the second side is now a separate
+  sign-in with its own password and cookie (`secure_rls_peer`, different salt).
+  `tests/test_api.py` pins that the old request shape is refused.
+- **Tool schemas in `secure_rls/tools/__init__.py`** are the model's whole
+  interface. No tenant, user, scope or database argument, ever.
+- **`secure_rls/oracle.py` and `verdict()` in `secure_rls/redteam.py`** are the
+  measurement behind the leak rate. They must not trust the layers they measure:
+  a verdict that only looked for a `tenant_id` column once scored
+  `SELECT name, salary` over foreign rows as contained.
 
 ## Working in this repository
 
-- Changing anything under `secure_rls/security/` or `db.py` requires the
-  isolation tests to pass, and normally requires a new test. A change that
+- Changing anything under `secure_rls/security/`, `db.py`, `api.py`,
+  `secure_rls/auth.py` or the tool schemas requires the isolation tests to pass,
+  and normally requires a new test. A hook (`.claude/hooks/isolation-tests.sh`)
+  runs them after every such edit and reports a failure back. A change that
   makes them pass by weakening an assertion is a change in the wrong direction.
 - Never add a tenant, user, scope or database argument to a tool schema. If a
   tool needs to know who is asking, it takes a `SecurityContext` in Python and
@@ -33,6 +53,14 @@ control.
   literals and quoting defeat string inspection.
 - Tool argument schemas forbid unknown fields. An ignored argument means the
   tool silently answers a different question.
+- The authorizer (L3) trusts the name of the view a read came through, and a
+  CTE can borrow that name: `WITH employees AS (SELECT * FROM employees_all)`
+  passes L3 alone and is stopped only by L4. Do not reason that "L3 would catch
+  it" for anything that can be spelled as a CTE.
+- Tests must pass on a clean checkout with no model running: create the
+  database through the code path under test, and replace the agent rather than
+  calling Ollama. Three CI failures came from tests that only passed because a
+  local `secure_rls.db` or a local model happened to exist.
 - Prefer failing loudly to failing open. Several bugs found in this project
   were silent: a renamed sqlglot argument key that skipped a rewrite, a dropped
   tool argument that removed a filter. Both returned plausible answers.
@@ -40,14 +68,22 @@ control.
 ## Commands
 
 ```bash
+source .venv/bin/activate            # every command below assumes the venv
 python scripts/gen_data.py           # regenerate employees.csv (seeded)
 python -m pytest -m "not slow"       # fast suite, no model needed
 python -m pytest -m slow             # retrieval tests (downloads embeddings)
 python -m ruff check . && python -m mypy
-streamlit run app.py                 # the app, needs Ollama on :11434
+npm --prefix web run build           # type-check and bundle the front end
+uvicorn api:app --port 8000          # API (serves web/dist when built); needs Ollama
+npm --prefix web run dev             # React dev server on :5173, proxies /api to :8000
+streamlit run app.py                 # the fallback UI on :8501
 python -m evals --limit 4            # evaluation smoke run
-python -m evals --models all         # full suite across three models (slow)
+python -m evals.benchmark --models all   # compare the three models (about an hour)
 ```
+
+Supported Python is 3.10 and 3.12, both in CI. sqlite3 differs between them:
+before 3.12 a multi-statement payload raises `sqlite3.Warning`, which is not a
+subclass of `sqlite3.Error`.
 
 ## Style
 

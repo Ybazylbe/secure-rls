@@ -33,9 +33,15 @@ from secure_rls.security.audit import AuditLog
 from secure_rls.security.context import SecurityContext
 from secure_rls.tools import ToolResult, build_tools
 
-#: Upper bound on model/tool round trips for one question. Without it a model
-#: that keeps rephrasing a refused query loops until the user gives up.
+#: Upper bound on model turns for one question. Without it a model that keeps
+#: rephrasing a refused query loops until the user gives up.
 MAX_STEPS = 6
+
+#: Upper bound on *tool calls*, which is the thing that actually costs time.
+#: Counting turns alone is not enough: one model message may carry a dozen tool
+#: calls, and qwen2.5 was observed sending twenty-four rejected calls to the
+#: same tool inside the turn budget, taking 88 seconds to answer nothing.
+MAX_TOOL_CALLS = 12
 
 SYSTEM_PROMPT = """\
 You are a data analyst for {tenant}. You answer questions about {tenant}'s \
@@ -168,6 +174,16 @@ def _sample_rows(ctx: SecurityContext, db_path: Path | str, limit: int = 3) -> s
     return f"{header}\n{body}"
 
 
+def _tool_calls_so_far(messages: list[Any]) -> int:
+    """How many tool calls this question has already made.
+
+    Counted across the whole transcript rather than per turn, because the
+    runaway case is a model emitting many calls in one message and then doing
+    it again.
+    """
+    return sum(len(getattr(m, "tool_calls", None) or []) for m in messages)
+
+
 def _explain_arguments(tools: list[Any]) -> Any:
     """Turn an argument-validation failure into instructions the model can use.
 
@@ -232,9 +248,12 @@ def build_agent(
 
     def should_continue(state: AgentState) -> str:
         last = state["messages"][-1]
-        if not getattr(last, "tool_calls", None):
+        calls = getattr(last, "tool_calls", None)
+        if not calls:
             return END
         if state["steps"] >= MAX_STEPS:
+            return END
+        if _tool_calls_so_far(state["messages"]) >= MAX_TOOL_CALLS:
             return END
         return "tools"
 

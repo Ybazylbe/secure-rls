@@ -113,8 +113,33 @@ class SuiteResult:
 
     @property
     def median_seconds(self) -> float:
-        times = sorted(c.seconds for c in self.cases) or [0.0]
-        return times[len(times) // 2]
+        return self._percentile(50)
+
+    @property
+    def p95_seconds(self) -> float:
+        """What the slowest answers cost.
+
+        The median hides the tail, and the tail is what an audience notices:
+        one question in twenty taking half a minute is the difference between a
+        demo that flows and one that stalls.
+        """
+        return self._percentile(95)
+
+    @property
+    def mean_seconds(self) -> float:
+        times = [c.seconds for c in self.cases]
+        return sum(times) / len(times) if times else 0.0
+
+    @property
+    def total_seconds(self) -> float:
+        return sum(c.seconds for c in self.cases) + sum(a.seconds for a in self.attacks)
+
+    def _percentile(self, pct: int) -> float:
+        times = sorted(c.seconds for c in self.cases)
+        if not times:
+            return 0.0
+        index = min(len(times) - 1, int(round((pct / 100) * (len(times) - 1))))
+        return times[index]
 
 
 def _ratio(hits: int, total: int) -> float | None:

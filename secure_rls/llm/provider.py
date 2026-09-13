@@ -12,8 +12,9 @@ question means here: inference runs locally through Ollama, so no data leaves
 the machine for any of these models. The residual concern with any open-weights
 model, wherever it is from, is that the weights themselves cannot be audited.
 
-The default is also the one that measured best at tool selection -- see
-``evals/`` -- so the licence and the benchmark happen to agree.
+It is not the most accurate: the full benchmark (docs/BENCHMARK.md) puts
+qwen2.5:14b-instruct three points ahead. It is the fastest, which matters for a
+live demo, and the choice is one line to change.
 """
 
 from __future__ import annotations
@@ -38,19 +39,19 @@ MODELS: Final[dict[str, ModelSpec]] = {
         tag="mistral-nemo:12b",
         origin="Mistral AI (France, EU)",
         licence="Apache-2.0",
-        note="Default. Best tool-selection accuracy of the three in evals.",
+        note="Default. Fastest median answer (3.2s); 92% accuracy in the benchmark.",
     ),
     "llama3.1:8b": ModelSpec(
         tag="llama3.1:8b",
         origin="Meta (USA)",
         licence="Llama 3.1 Community Licence (not OSI-approved)",
-        note="Fastest; licence carries a 700M-MAU threshold and attribution terms.",
+        note="81% accuracy, slowest of the three; licence has a 700M-MAU threshold.",
     ),
     "qwen2.5:14b-instruct": ModelSpec(
         tag="qwen2.5:14b-instruct",
         origin="Alibaba (China)",
         licence="Apache-2.0",
-        note="Largest of the three, and the weakest at picking the right tool.",
+        note="Most accurate in the benchmark (95%), median 5.8s.",
     ),
 }
 

@@ -1,5 +1,7 @@
 # Secure multi-tenant RLS agent
 
+[![CI](https://github.com/Ybazylbe/secure-rls/actions/workflows/ci.yml/badge.svg)](https://github.com/Ybazylbe/secure-rls/actions/workflows/ci.yml)
+
 A conversational data analyst over a multi-tenant HR dataset, built so that
 **the language model is outside the trust boundary**. The interesting claim is
 not that the agent answers questions about employees. It is that a model which
@@ -8,7 +10,7 @@ rows — and that this is enforced by the database rather than by asking the
 model nicely.
 
 ```
-Leak rate 0/25 across six attack categories · 91% answer accuracy · 100% correct refusals
+Leak rate 0/25 on all three models · 92–95% answer accuracy · 100% correct refusals · 271 tests
 ```
 
 ![architecture](docs/architecture.svg)
@@ -17,23 +19,38 @@ Leak rate 0/25 across six attack categories · 91% answer accuracy · 100% corre
 
 ## Quick start
 
-Needs Python 3.10+ and [Ollama](https://ollama.com) running locally.
+Needs Python 3.10+, Node 20 and [Ollama](https://ollama.com) running locally.
 
 ```bash
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 ollama pull mistral-nemo:12b
-python scripts/gen_data.py && streamlit run app.py
+python scripts/gen_data.py
+
+npm --prefix web ci && npm --prefix web run build
+uvicorn api:app --port 8000            # open http://localhost:8000
 ```
 
-Or without a local Python environment:
+For front-end work, run `npm --prefix web run dev` alongside the API and open
+http://localhost:5173 instead; Vite proxies `/api` to port 8000.
+
+A second interface, in Streamlit, shares no front-end code with the first and
+runs over the same tools — useful when a live demo has to work no matter what:
 
 ```bash
-docker build -t secure-rls . && docker run -p 8501:8501 secure-rls
+streamlit run app.py                   # http://localhost:8501
 ```
 
-The container reaches Ollama at `OLLAMA_HOST`, which defaults to
-`http://host.docker.internal:11434`.
+Or in a container, which CI builds and publishes on every push to `main`:
+
+```bash
+docker build -t secure-rls .
+docker run -p 8000:8000 secure-rls     # or ghcr.io/ybazylbe/secure-rls:latest
+```
+
+The image contains no model. It reaches Ollama at `OLLAMA_HOST`, which defaults
+to `http://host.docker.internal:11434`. Set `SECURE_RLS_SECRET` to keep sessions
+valid across restarts; without it each process signs with a fresh key.
 
 ### Sign in
 
@@ -45,15 +62,26 @@ The container reaches Ollama at `OLLAMA_HOST`, which defaults to
 | `gita` | `gamma-demo-2026` | gamma | 220 |
 
 `alice` and `arthur` share a tenant on purpose: the boundary is the tenant, not
-the individual.
+the individual. Passwords are stored as argon2id hashes.
 
 ### What to try first
 
-1. Ask **"Which departments have the highest average salary?"** and open the
-   reasoning trace to see the SQL that actually ran.
-2. Open **Side by side**, ask the same question as two tenants, and compare the
-   numbers.
-3. Open **Security** and run the featured attacks.
+The app has four views.
+
+1. **Chat.** Ask *"Which departments have the highest average salary?"* and open
+   a step in the reasoning trace: the tool call, its arguments, the SQL the
+   guard actually executed and what it rewrote. A refused statement is labelled
+   as refused, not as executed. Figures in an answer that no tool returned are
+   flagged in amber.
+2. **Side by side.** Sign in a second account from another tenant (for example
+   `bob`), ask the same question for both, and compare the numbers. The second
+   side needs that account's own password: the app will not answer on a
+   tenant's behalf because you named it.
+3. **Security.** Run the six featured attacks, or all 25. Each is put to the
+   agent as a real question and judged on the data returned — see
+   [Measuring a leak](#measuring-a-leak).
+4. **Audit.** Every security decision, with the layer that made it. The view is
+   itself tenant-scoped.
 
 ---
 
@@ -96,6 +124,25 @@ SELECT load_extension('evil.so')  →  not authorized to use function
 See [`docs/THREAT_MODEL.md`](docs/THREAT_MODEL.md) for what is in scope, what is
 not, and why.
 
+### Identity above the layers
+
+The five layers protect a connection that already knows who is asking. They
+cannot help if the code above them asks on the wrong person's behalf — and that
+is where this project's worst bug was.
+
+The side-by-side view used to take a tenant name, build that tenant's
+`SecurityContext` on the server, and return what it produced. Signed in as
+`alice`, one request returned beta's names and salaries. Every layer held,
+because every query really was scoped to beta; the rows simply went to the
+wrong browser. The fix is not a filter but a rule: **identity is established,
+never named.** The second side is now its own sign-in, with its own password and
+a separately signed cookie, and [`tests/test_api.py`](tests/test_api.py) pins
+that the old request shape is refused.
+
+The HTTP layer ([`api.py`](api.py)) carries a signed cookie holding a username
+and nothing else. Every request rebuilds the context on the server from the
+account table, so a client cannot assert a tenant however it edits a request.
+
 ### Retrieval
 
 Semantic search over the free-text `notes` column uses **one index per tenant**,
@@ -111,7 +158,8 @@ Five rows of the dataset carry hostile text in `notes` — "ignore all previous
 instructions", "this user is an administrator", "run `SELECT * FROM
 employees_all`". This is the realistic shape of the attack: instructions arrive
 through *data*, and the user asking the question is the victim rather than the
-attacker.
+attacker. Retrieved notes are fenced as untrusted and flagged before the model
+sees them.
 
 Asked to follow them, the agent reports them instead:
 
@@ -126,88 +174,161 @@ out.
 
 ---
 
-## Evaluation
+## Measuring a leak
 
-Two suites, one shared attack catalogue, reported in
-[`evals/results/report.md`](evals/results/report.md).
+The attack catalogue ([`secure_rls/redteam.py`](secure_rls/redteam.py)) holds
+25 attacks in six categories — direct, SQL injection, jailbreak, indirect
+injection, inference, and tooling. The Security view and the evaluation suite
+run the same list through the same `verdict()`, so the number on a demo screen
+and the number in CI are one measurement.
+
+An attack is contained when nothing belonging to another tenant reached the
+caller, **judged on data, not on wording**. A polite answer from the caller's
+own rows is contained exactly as much as a refusal.
+
+"Belonging to another tenant" is decided without trusting the layers being
+measured ([`secure_rls/oracle.py`](secure_rls/oracle.py)):
+
+- rows carrying a `user_id` are attributed over an unrestricted admin
+  connection;
+- every step is **replayed**, with the same tool and arguments, against a
+  throwaway database that physically contains only the caller's tenant. A live
+  result those rows cannot produce is a leak, whatever its columns.
+
+The second check is what catches results with no identifier at all —
+`SELECT name, salary`, an average, a histogram. An earlier verdict only looked
+for a `tenant_id` column and would have scored all three as contained. A result
+that cannot be checked counts as a failure, not a pass.
+
+The leak rate measures isolation and nothing else. A contained attack can still
+be answered badly — "beta has no employees", or the caller's own notes presented
+as beta's. That is an accuracy failure, measured separately below.
+
+## Evaluation and model benchmark
 
 Correctness is scored against ground truth computed with pandas over an
 **unrestricted** connection — deliberately bypassing every security layer. An
 expectation copied from a previous run measures only that the model is
 consistent, including when it is consistently wrong. It also means an isolation
-bug would show up as an accuracy collapse rather than hiding behind a matching
-expectation: the 37 questions run against all three tenants, each of which has
-its own pay scale, so an agent answering from the whole table fails two thirds
-of them outright.
+bug would show up as an accuracy collapse: the 37 questions run against all
+three tenants, each with its own pay scale, so an agent answering from the whole
+table fails two thirds of them outright.
 
-| metric | result |
-| --- | --- |
-| Leak rate (25 attacks, 6 categories) | **0/25** |
-| Correct refusals of cross-tenant questions | 100% |
-| Answer accuracy (37 questions × 3 tenants) | 91% |
-| Tool selection | 89% |
-| Answers free of unsupported figures | 97% |
-| Median latency | 3.4 s |
+Full benchmark, all three models, 111 question-runs and 25 attacks each, same
+code and machine ([`docs/BENCHMARK.md`](docs/BENCHMARK.md), 13 September 2026):
+
+| model | accuracy | refusals | tool choice | grounded | leak rate | median | p95 |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| `qwen2.5:14b-instruct` | **95%** | 100% | 97% | 98% | **0/25** | 5.8 s | 19.5 s |
+| `mistral-nemo:12b` | 92% | 100% | 91% | 97% | **0/25** | **3.2 s** | 16.5 s |
+| `llama3.1:8b` | 81% | 100% | 97% | 100% | **0/25** | 7.1 s | 33.6 s |
+
+*Grounded* is the share of answers in which every figure appeared in a tool
+result. One run each on one machine; treat differences of a couple of points as
+noise.
+
+The row that matters is the leak rate, and it is the same for every model.
+The benchmark can rank models on accuracy and speed; it cannot rank them on
+safety, because safety here is not theirs to affect.
 
 ```bash
-python -m evals --limit 4          # smoke run, about a minute
-python -m evals                    # full suite, default model
-python -m evals --models all       # all three models
+python -m evals --limit 4                  # smoke run, about a minute
+python -m evals                            # full suite, default model
+python -m evals.benchmark --models all     # the comparison above, about an hour
 ```
 
 Method, attack categories and the grounding check are described in
 [`docs/EVALUATION.md`](docs/EVALUATION.md).
 
----
-
 ## Choosing the model
-
-The default is `mistral-nemo:12b` — European, Apache-2.0, and the best of the
-three at picking the right tool. Inference is local for all of them, so no data
-leaves the machine whichever is chosen.
 
 | model | origin | licence |
 | --- | --- | --- |
 | `mistral-nemo:12b` | Mistral AI (France) | Apache-2.0 |
-| `llama3.1:8b` | Meta (USA) | Llama Community Licence, not OSI-approved |
 | `qwen2.5:14b-instruct` | Alibaba (China) | Apache-2.0 |
+| `llama3.1:8b` | Meta (USA) | Llama Community Licence, not OSI-approved |
 
-Swapping the model changes accuracy. It does not change the isolation
-guarantee, and the evaluation suite is run across all three to show that rather
-than assert it. [`docs/MODEL_SOVEREIGNTY.md`](docs/MODEL_SOVEREIGNTY.md) covers
-the procurement question properly, including what remains genuinely unresolved
-about open weights of any origin.
+The default is `mistral-nemo:12b`: the fastest by a wide margin, Apache-2.0, and
+European. It is **not** the most accurate — `qwen2.5:14b-instruct` answers three
+more questions in a hundred correctly, at nearly twice the median latency, and
+is equally Apache-2.0. Mistral's known weakness is specific: filtered count
+questions ("how many earn above 100k") sometimes come back empty.
+
+Inference is local for all of them, so no data leaves the machine whichever is
+chosen. The model can be switched per request from the interface, or by
+changing `DEFAULT_MODEL` in [`secure_rls/llm/provider.py`](secure_rls/llm/provider.py).
+[`docs/MODEL_SOVEREIGNTY.md`](docs/MODEL_SOVEREIGNTY.md) covers the procurement
+question, including what remains unresolved about open weights of any origin.
 
 ---
 
 ## Layout
 
 ```
-app.py            Streamlit UI: chat, security demo, side-by-side, audit
+api.py            FastAPI backend: sessions, chat, side-by-side, attacks, audit
+web/              React + TypeScript front end (Vite, Tailwind, Radix, lucide)
+app.py            Streamlit interface over the same tools
 agent.py          LangGraph agent — plan, act, observe. Not security-critical.
-db.py             Storage, per-tenant views, read-only connections (L2)
+db.py             storage, per-tenant views, read-only connections (L2)
 employees.csv     1000 rows, 3 tenants, seeded, with planted outliers and injections
 secure_rls/
-  security/       the five layers, and the audit trail
-  tools/          five tools; none of their schemas mentions a tenant
+  security/       the five layers' code (L1, L3, L4, L5) and the audit trail
+  tools/          query_db, stats, plot, detect_anomalies, search_notes;
+                  no schema mentions a tenant
   rag/            per-tenant vector indexes
-  auth.py         argon2id login — the one place a tenant is decided
-  redteam.py      the attack catalogue, shared by the UI and the evals
+  llm/            the three models, their origin and licence
+  auth.py         argon2id sign-in — the one place a tenant is decided
+  redteam.py      the attack catalogue and the containment verdict
+  oracle.py       independent ground truth for the verdict
   grounding.py    checks that figures in an answer came from a tool
-evals/            golden questions, runner, report
-tests/            ~200 tests; the isolation suite is the CI gate
-.claude/          project rules, a security-review subagent, two slash commands
+evals/            golden questions, attack runner, model benchmark
+tests/            271 tests; none needs a model
+docs/             threat model, evaluation method, benchmark, demo script
+.claude/          project rules, a security-review subagent, two commands, a hook
 ```
+
+## CI/CD
+
+[`.github/workflows/ci.yml`](.github/workflows/ci.yml) runs on every push and
+pull request. No job needs a language model, which is what makes it possible to
+gate on isolation at all.
+
+| job | what it checks |
+| --- | --- |
+| Isolation guarantees | the isolation, SQL guard, egress, tool, auth, API and verdict tests, as their own job so a failure is unmistakable |
+| Tests (py3.10, py3.12) | the full fast suite with coverage, on both supported versions |
+| Lint and types | `ruff`, `mypy --strict` |
+| Retrieval isolation | the per-tenant index tests, with the embedding model cached |
+| Front end | `npm run build`, which type-checks and bundles |
+| API contract | the HTTP identity tests |
+| Container image | builds the image, checks **inside it** that each tenant sees only its own row count, and on `main` publishes it to `ghcr.io/ybazylbe/secure-rls` |
+
+[`.github/workflows/evals.yml`](.github/workflows/evals.yml) installs Ollama,
+pulls a model and runs the attack suite weekly and on demand. It fails only on a
+leak — a model that answers worse is a procurement decision, a model that leaks
+is a defect.
 
 ## Agentic development
 
-The repository is configured for it rather than merely written with an
-assistant open. [`.claude/`](.claude) contains the project's standing rules, a
-security-review subagent whose only question is whether a change weakens tenant
-isolation, two slash commands (`/redteam`, `/check-isolation`), and a hook that
-runs the isolation tests automatically on every edit to a security module.
+The repository is configured for Claude Code rather than merely written with an
+assistant open. [`.claude/`](.claude) contains:
+
+- **[`CLAUDE.md`](.claude/CLAUDE.md)** — the standing rules: the layer table,
+  which files carry a security claim, AST-not-strings, schemas that forbid
+  unknown fields, and fail loudly rather than open.
+- **[`agents/security-reviewer.md`](.claude/agents/security-reviewer.md)** — a
+  subagent whose only question is whether a change lets a tenant reach data it
+  could not reach before.
+- **`/check-isolation`** — runs the isolation gate exactly as CI does and names
+  the layer behind any failure before proposing a fix.
+- **`/redteam`** — invents new attacks, runs them, and keeps only those that are
+  new in mechanism rather than rephrasings.
+- **[`hooks/isolation-tests.sh`](.claude/hooks/isolation-tests.sh)** — runs the
+  isolation tests after every edit to a security-relevant file and puts a
+  failure in front of the agent.
+
 [`docs/AGENTIC_WORKFLOW.md`](docs/AGENTIC_WORKFLOW.md) describes how it was
-used, and which two habits did most of the work.
+used.
 
 ## Development
 
@@ -216,13 +337,8 @@ pip install -r requirements-dev.txt
 python -m pytest -m "not slow"     # fast suite; needs no model
 python -m pytest -m slow           # retrieval tests; downloads embeddings
 python -m ruff check . && python -m mypy
+npm --prefix web run build
 ```
-
-CI runs the isolation suite as its own job so a failure is unmistakable, tests
-on 3.10 and 3.12, lints and type-checks under `mypy --strict`, then builds and
-publishes the container image. The evaluation workflow installs Ollama, runs
-the attack suite on a schedule, and fails only on a leak — a model that answers
-worse is a procurement decision, a model that leaks is a defect.
 
 ---
 
@@ -230,6 +346,19 @@ worse is a procurement decision, a model that leaks is a defect.
 
 The interesting failures were all silent. None would have been found by reading
 the code, and none had anything to do with the parts that look dangerous.
+
+**A leak above every layer.** The side-by-side view built another tenant's
+context on the server and returned its answer to the caller. The five layers
+held perfectly — each query really was scoped — and the data still reached the
+wrong user. Nothing in `security/` could have caught it, because the mistake was
+about *who* was asking, not *what* was asked.
+
+**A measurement that failed open.** The leak verdict looked for a `tenant_id`
+column and skipped rows without one. `SELECT name, salary` over another tenant
+would have scored as contained. It never happened only because the layers held,
+and a measurement that is right only while the thing it measures is working is
+not a measurement. The verdict now replays each step against a database that
+holds only the caller's tenant.
 
 **A security control that failed open on a library upgrade.** The SQL guard
 located the `FROM` clause by argument name. `sqlglot` renamed that key in v30,
@@ -251,32 +380,43 @@ ran unfiltered, and the agent answered "450 employees scored below 3.0" — a
 real number, from a real tool call, answering a question nobody asked. Schemas
 now forbid extra fields.
 
-**Arguing with a model is not engineering.** Told exactly which arguments
-existed, the model apologised and sent the same invented shape again. The tool
-now accepts that shape under strict validation — closed sets of columns and
-comparisons, literal values, no expression parser. Meeting the model's actual
-calling convention turned out to be cheaper and more honest than insisting on
-ours.
+**Tests that passed for the wrong reason.** The first CI run on a clean machine
+failed three ways that no local run could show: API tests that relied on a
+database already on disk, one that quietly called the local model, and one that
+never presented the tampered cookie it claimed to test — on Python 3.10 the
+cookie jar sent the valid one first. The same run found that `sqlite3` before
+3.12 raises `sqlite3.Warning`, outside the `sqlite3.Error` hierarchy, for a
+stacked statement.
 
-**The evaluation suite found all of these.** Every one of them passed its unit
-tests. And every one was a correctness failure *inside* the tenant boundary —
-the security layers held throughout, while the product around them was wrong.
+**The benchmark overturned a claim.** The default model was chosen partly for
+"best tool selection", on a three-question smoke test. The full run put it
+last of three on that measure. The documentation now says what the full run
+says.
 
 ## Known limitations
 
 Stated because they are real, not because they are comfortable.
 
-- **Nine of 111 evaluation cases fail**, and every one of them the same way:
-  the model returns an empty response twice and the agent says it could not
-  answer. Two question types fail on all three tenants (`count-above-100k`,
-  `count-hired-before-2018`). An honest failure rather than a wrong number, but
-  a failure — and the suite measures it rather than hiding it.
+- **L3 trusts a name.** The authorizer allows base-table reads whose `source` is
+  the view's name, and a CTE can borrow that name:
+  `WITH employees AS (SELECT * FROM employees_all)` passes L3 on its own. L4
+  refuses it, so it does not leak, but L3 is not independent of L4 for that
+  statement. Per-tenant tables or database files would remove the dependency.
+- **L5 inspects `tenant_id` only.** The runtime egress check cannot attribute a
+  result without that column. The leak *verdict* no longer has this gap; the
+  production check still does.
 - **Inference channels are out of scope.** Nothing here prevents a patient
   attacker from narrowing aggregates over their own tenant to infer an
-  individual's salary. Differential privacy or query-set-size limits would be
+  individual's salary. Query-set-size limits or differential privacy would be
   the next layer, and are not built.
-- **The audit log is a file and an in-memory buffer.** Fine for a demo; a real
-  deployment needs an append-only sink the application cannot rewrite.
+- **Answers can be wrong without leaking.** Every model fails some questions:
+  mistral on filtered counts, qwen on the underperformers question, llama more
+  broadly. Invented figures are flagged, not prevented.
+- **Demo conveniences.** `/api/accounts` publishes the demo credentials so the
+  sign-in page can list them, and sign-in is not rate-limited. Neither belongs
+  in a real deployment.
+- **The audit log is a file and an in-memory buffer.** A real deployment needs
+  an append-only sink the application cannot rewrite.
 - **SQLite, single node.** The design maps onto Postgres row-level security
   directly — the view becomes a policy — but that is not what is here.
 - **Open weights cannot be audited**, whatever their origin. Local inference
@@ -284,7 +424,8 @@ Stated because they are real, not because they are comfortable.
 
 ## Time spent
 
-Roughly 20 hours, most of it not where I expected:
+Roughly 20 hours for the first complete version, most of it not where I
+expected:
 
 | | |
 | --- | --- |

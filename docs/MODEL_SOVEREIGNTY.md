@@ -44,18 +44,29 @@ variant before relying on this table.)*
 
 ## Why the default is what it is
 
-`mistral-nemo:12b` is the default for three reasons, in this order:
+`mistral-nemo:12b` is the default. The full benchmark
+([`BENCHMARK.md`](BENCHMARK.md) — 111 questions and 25 attacks per model, same
+code, same machine) does **not** make it the most accurate:
 
-1. **It measured best at tool selection.** In an early smoke test it picked the
-   right tool in 3 of 3 cases where `qwen2.5:14b-instruct` — the largest of the
-   three — managed 2 of 3, choosing a chart tool for "what is the average
-   salary". More parameters did not mean better tool discipline.
+| model | accuracy | tool choice | leak rate | median |
+| --- | --- | --- | --- | --- |
+| `qwen2.5:14b-instruct` | 95% | 97% | 0/25 | 5.8 s |
+| `mistral-nemo:12b` | 92% | 91% | 0/25 | 3.2 s |
+| `llama3.1:8b` | 81% | 97% | 0/25 | 7.1 s |
+
+It stays the default for three reasons, and they should be stated as trade-offs
+rather than as a ranking:
+
+1. **Speed.** The fastest median by a wide margin, which is what a live demo
+   feels. Its weakness is known and specific: count questions with a filter
+   ("how many earn above 100k") sometimes come back empty.
 2. **Apache-2.0**, so no licence conversation is needed.
-3. **European origin**, which removes a procurement objection at no cost, given
-   that (1) and (2) already pointed here.
+3. **European origin**, which removes a procurement objection at no cost.
 
-Note the ordering. The model was not chosen for its passport and then justified;
-it was chosen on measurement, and the passport happened to agree.
+An earlier version of this section claimed mistral was best at tool selection,
+on a three-question smoke test. The full run contradicted it, which is the
+argument for running the full run. If accuracy matters more than latency,
+`qwen2.5:14b-instruct` is the better choice and is equally Apache-2.0.
 
 ## Why it does not matter much
 

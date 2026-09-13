@@ -100,25 +100,41 @@ class AgentState(TypedDict):
 class Step:
     """One tool invocation, for the reasoning trace shown in the UI.
 
-    Three outcomes, not two. A call can succeed (``result``), be rejected
-    before it runs (``error`` -- bad arguments, caught by the schema), or
-    leave neither, which means it ran and its output went missing. Collapsing
-    the last two into "no result" made a correctly blocked call look like a
-    broken one, and a broken one look like a blocked one.
+    Four outcomes, and they are not interchangeable:
+
+    * **ok** -- the tool ran and its result is here.
+    * **rejected** -- the schema refused the arguments; nothing ran.
+    * **skipped** -- the step limit was reached after the model had composed
+      the call, so it was never dispatched. Also nothing ran.
+    * **unverifiable** -- it ran and the result did not reach us. This is the
+      only one that means anything is unknown.
+
+    Collapsing them loses the distinction that matters: the first three are all
+    accounted for, and only the last is a hole in the evidence. An earlier
+    version reported a skipped call as unverifiable, which turned a tidy stop
+    at a limit into an unexplained gap in the security verdict.
     """
 
     tool: str
     arguments: dict[str, Any]
     result: ToolResult | None = None
     error: str | None = None
+    #: Whether the tool actually ran. False when the graph stopped at its step
+    #: limit after the model had already composed a call: the call exists in
+    #: the transcript and was never dispatched.
+    executed: bool = False
 
     @property
     def rejected(self) -> bool:
         return self.result is None and self.error is not None
 
     @property
+    def skipped(self) -> bool:
+        return self.result is None and self.error is None and not self.executed
+
+    @property
     def unverifiable(self) -> bool:
-        return self.result is None and self.error is None
+        return self.result is None and self.error is None and self.executed
 
 
 @dataclass(slots=True)
@@ -395,6 +411,7 @@ def _read_transcript(final: dict[str, Any]) -> tuple[list[Step], str]:
             # attack contained, which is a reassuring verdict backed by
             # nothing.
             if matched is not None:
+                matched.executed = True
                 if hasattr(artifact, "for_model"):
                     matched.result = artifact
                 elif getattr(message, "status", None) == "error":

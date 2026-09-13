@@ -375,6 +375,8 @@ def render_trace(answer: AgentAnswer) -> None:
         result = step.result
         if step.rejected:
             status, icon = "rejected", "🚫"
+        elif step.skipped:
+            status, icon = "skipped", "⏭️"
         elif step.unverifiable:
             status, icon = "unrecorded", "⚠️"
         elif result is not None and result.refused:
@@ -389,6 +391,12 @@ def render_trace(answer: AgentAnswer) -> None:
                     "this tool declares. Nothing was executed."
                 )
                 st.code(step.error or "", language="text")
+                continue
+            if step.skipped:
+                st.info(
+                    "The step limit was reached before this call was dispatched, so "
+                    "it never ran."
+                )
                 continue
             if result is None:
                 st.warning(

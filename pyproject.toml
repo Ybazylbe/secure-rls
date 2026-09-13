@@ -20,7 +20,9 @@ select = ["E", "F", "I", "UP", "B", "SIM", "S"]
 # S311: the dataset generator wants a *seeded, reproducible* PRNG. Using a
 #       cryptographic source there would break the deterministic fixtures
 #       the evaluation suite depends on.
-per-file-ignores = { "tests/*" = ["S101", "S608", "SIM117"], "evals/*" = ["S101", "S608"], "scripts/gen_data.py" = ["S311"] }
+# S106/S107: the demo passwords are published in the README; there is nothing
+#       here to leak.
+per-file-ignores = { "tests/*" = ["S101", "S105", "S106", "S107", "S608", "SIM117"], "evals/*" = ["S101", "S608"], "scripts/gen_data.py" = ["S311"] }
 
 [tool.mypy]
 # No python_version pin: mypy then type-checks against the interpreter actually

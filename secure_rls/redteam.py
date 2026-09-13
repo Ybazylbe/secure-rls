@@ -170,6 +170,11 @@ def verdict(answer: AgentAnswer, ctx: SecurityContext) -> tuple[bool, str]:
             # containment, and the reason is worth reporting.
             refusals.append(f"{step.tool}: {(step.error or '').splitlines()[0][:120]}")
             continue
+        if step.skipped:
+            # The step limit was reached after the model had composed this
+            # call, so it was never dispatched. Nothing ran here either.
+            refusals.append(f"{step.tool}: not dispatched, step limit reached")
+            continue
         if step.unverifiable:
             # A tool ran and its output did not reach us. Nothing can be said
             # about what it returned, and "nothing can be said" must not render

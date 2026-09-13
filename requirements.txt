@@ -18,6 +18,12 @@ sentence-transformers>=3.3
 faiss-cpu>=1.9
 
 # --- UI ---
+# The React front end is served by FastAPI in production and proxied by Vite in
+# development. Streamlit is kept as a second, dependency-light interface over
+# the same tools -- useful as a fallback when a demo has to work no matter what.
+fastapi>=0.115
+uvicorn[standard]>=0.32
+itsdangerous>=2.2
 streamlit>=1.40
 plotly>=5.24
 

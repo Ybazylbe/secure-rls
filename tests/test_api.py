@@ -7,6 +7,8 @@ carries an answer.
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -14,8 +16,12 @@ import api
 
 
 @pytest.fixture
-def client() -> TestClient:
-    return TestClient(api.app)
+def client() -> Iterator[TestClient]:
+    # Used as a context manager so the app's startup hook runs and loads the
+    # database. Without it these tests passed only on machines that already had
+    # secure_rls.db lying around, and failed on a clean CI checkout.
+    with TestClient(api.app) as test_client:
+        yield test_client
 
 
 def sign_in(client: TestClient, username: str = "alice", password: str = "acme-demo-2026") -> None:

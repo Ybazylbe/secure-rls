@@ -124,7 +124,28 @@ STYLE = f"""
       background: var(--surface);
       border-right: 1px solid var(--line);
   }}
-  [data-testid="stSidebar"] h3 {{ color: var(--teal-deep); }}
+  [data-testid="stSidebar"] h5 {{
+      color: var(--teal-deep);
+      margin: 0;
+      padding: 0;
+  }}
+  /* Streamlit's sidebar is generous with space it does not need: a 16px gap
+     between every block, 49px per divider and 96px of floor padding add up to
+     most of a screen. Tightened, and the column is made full height so the
+     conversation list can grow and the sign-out button can sit at the bottom. */
+  [data-testid="stSidebarHeader"] {{ height: 2.4rem; padding-bottom: 0; }}
+  [data-testid="stSidebarUserContent"] {{ padding-top: .2rem; padding-bottom: 1rem; }}
+  [data-testid="stSidebarUserContent"] > div > [data-testid="stVerticalBlock"] {{
+      gap: .55rem;
+      min-height: calc(100vh - 4.6rem);
+  }}
+  [data-testid="stSidebar"] hr {{ margin: .5rem 0; }}
+  /* The keyed container is nested a couple of wrappers deep, so the auto
+     margin has to go on whichever direct child of the full-height column holds
+     it -- setting it on the container itself does nothing, because that element
+     is not a flex item of the column. */
+  [data-testid="stSidebarUserContent"] > div > [data-testid="stVerticalBlock"]
+      > *:has([class*="st-key-signout"]) {{ margin-top: auto; }}
   [class*="st-key-chat_"] button {{
       justify-content: flex-start !important;
       text-align: left !important;
@@ -402,10 +423,9 @@ def render_trace(answer: AgentAnswer) -> None:
 
 
 def tenant_badge(ctx: SecurityContext, rows: int) -> None:
-    st.markdown(
-        f"### Tenant `{ctx.tenant_id}`\n"
-        f"{ctx.username} · {ctx.role} · **{rows}** employees visible"
-    )
+    """Two lines, not four. Who you are is context, not the headline."""
+    st.markdown(f"##### Tenant `{ctx.tenant_id}`")
+    st.caption(f"{ctx.username} · {ctx.role} · **{rows}** employees visible")
 
 
 # ---------------------------------------------------------------------------
@@ -650,7 +670,6 @@ def sidebar(ctx: SecurityContext) -> str:
     """Who you are, which model answers, and every conversation so far."""
     with st.sidebar:
         tenant_badge(ctx, db.row_count(ctx))
-        st.divider()
 
         model = st.selectbox(
             "Model",
@@ -675,10 +694,13 @@ def sidebar(ctx: SecurityContext) -> str:
                 st.session_state["current_chat"] = chat_id
                 st.rerun()
 
-        st.divider()
-        if st.button("Sign out", use_container_width=True):
-            st.session_state.clear()
-            st.rerun()
+        # Pushed to the floor by CSS rather than by a spacer, so the
+        # conversation list takes whatever room is left instead of the layout
+        # depending on how many conversations happen to exist.
+        with st.container(key="signout"):
+            if st.button("Sign out", use_container_width=True):
+                st.session_state.clear()
+                st.rerun()
     return model
 
 

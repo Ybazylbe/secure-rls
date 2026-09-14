@@ -27,8 +27,8 @@ def audit() -> AuditLog:
     return AuditLog(None)  # no file, buffer only
 
 
-def ctx_for(tenant: str) -> SecurityContext:
-    return SecurityContext(user_id=1, username=f"{tenant}_analyst", tenant_id=tenant)
+def ctx_for(tenant: str, role: str = "analyst") -> SecurityContext:
+    return SecurityContext(user_id=1, username=f"{tenant}_{role}", tenant_id=tenant, role=role)
 
 
 # --------------------------------------------------------------------------
@@ -67,6 +67,49 @@ def test_sql_tool_returns_only_own_rows(db_path: Path, tenant: str, audit: Audit
     result = run_sql("SELECT * FROM employees", ctx_for(tenant), audit, db_path)
     assert not result.refused
     assert {row["tenant_id"] for row in result.rows} == {tenant}
+
+
+# --------------------------------------------------------------------------
+# A role can be masked out of columns, not just tenants out of rows
+# --------------------------------------------------------------------------
+
+
+def test_a_viewer_never_receives_salary_or_notes_values(
+    db_path: Path, tenant: str, audit: AuditLog
+) -> None:
+    """Column-level masking, enforced in the view, not filtered by the tool.
+
+    Row-level security only at the tenant's grain answers "which rows" but not
+    "which columns of my own tenant's rows" -- a real per-role need one grain
+    down. `viewer` demonstrates the view can enforce that too: every row is
+    still the caller's own tenant, but two columns come back NULL regardless
+    of what SQL asks for them.
+    """
+    result = run_sql("SELECT * FROM employees", ctx_for(tenant, role="viewer"), audit, db_path)
+    assert not result.refused
+    assert result.rows, "the query itself must not be refused or empty"
+    assert all(row["salary"] is None for row in result.rows)
+    assert all(row["notes"] is None for row in result.rows)
+    # Masking is per-column, not per-row: everything else is untouched.
+    assert all(row["name"] and row["department"] for row in result.rows)
+
+
+def test_an_analyst_is_not_affected_by_the_viewer_mask(
+    db_path: Path, tenant: str, audit: AuditLog
+) -> None:
+    result = run_sql("SELECT salary FROM employees", ctx_for(tenant), audit, db_path)
+    assert not result.refused
+    assert all(row["salary"] is not None for row in result.rows)
+
+
+def test_a_viewer_cannot_recover_a_masked_column_by_naming_it_differently(
+    db_path: Path, audit: AuditLog
+) -> None:
+    """Masking happens in the view SQLite hands back, not by inspecting the model's query."""
+    for sql in ("SELECT salary FROM employees", "SELECT salary AS pay FROM employees LIMIT 1"):
+        result = run_sql(sql, ctx_for("acme", role="viewer"), audit, db_path)
+        assert not result.refused, sql
+        assert all(v is None for row in result.rows for v in row.values()), sql
 
 
 def test_sql_tool_reports_a_refusal_instead_of_raising(db_path: Path, audit: AuditLog) -> None:
@@ -197,6 +240,31 @@ def test_each_tenant_gets_its_own_index(db_path: Path) -> None:
             index = get_index(ctx_for(tenant), db_path)
             assert index.tenants_present == {tenant}
             assert len(index) > 0
+    finally:
+        reset_indexes()
+
+
+@pytest.mark.slow
+def test_a_viewer_and_an_analyst_do_not_share_a_cached_index(db_path: Path) -> None:
+    """The cache key must be (tenant, role), not tenant alone.
+
+    Keyed by tenant only, whichever role asked first would decide what the
+    other one searched: an analyst's request built first would leave a viewer
+    searching real note text through a cache hit, and the reverse would leave
+    the analyst searching nothing but masked placeholders. Building the
+    analyst's index first is the case that actually matters -- it is the one
+    that would leak.
+    """
+    reset_indexes()
+    try:
+        analyst_index = get_index(ctx_for("acme"), db_path)
+        viewer_index = get_index(ctx_for("acme", role="viewer"), db_path)
+        assert analyst_index is not viewer_index
+
+        analyst_notes = {n.text for n in analyst_index._notes}  # test-only peek at the cache
+        viewer_notes = {n.text for n in viewer_index._notes}
+        assert viewer_notes == {"[notes masked for this role]"}
+        assert analyst_notes != viewer_notes
     finally:
         reset_indexes()
 

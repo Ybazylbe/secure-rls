@@ -35,7 +35,7 @@ from langchain_core.messages import AnyMessage
 from langgraph.graph.message import add_messages
 from pydantic import ValidationError
 
-from db import DEFAULT_DB_PATH, SCHEMA_PROMPT, TENANT_VIEW, tenant_connection
+from db import DEFAULT_DB_PATH, TENANT_VIEW, schema_prompt_for, tenant_connection
 from secure_rls.grounding import (
     claimed_tenants,
     clean_for_display,
@@ -431,7 +431,7 @@ def ask(
         tenant=ctx.tenant_id,
         username=ctx.username,
         role=ctx.role,
-        schema=SCHEMA_PROMPT,
+        schema=schema_prompt_for(ctx.role),
         sample=_sample_rows(ctx, db_path),
     )
     limits = {"recursion_limit": MAX_STEPS * 2 + 2}

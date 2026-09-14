@@ -38,7 +38,7 @@ EMBEDDING_MODEL: Final = "BAAI/bge-small-en-v1.5"
 #: retrieval and costs nothing.
 _QUERY_PREFIX: Final = "Represent this sentence for searching relevant passages: "
 
-_indexes: dict[str, NoteIndex] = {}
+_indexes: dict[tuple[str, str], NoteIndex] = {}
 _lock = threading.Lock()
 _encoder: Any = None
 
@@ -156,6 +156,13 @@ def _keyword_scores(
     return scores
 
 
+#: A note's text is replaced with this when the caller's role masks the
+#: `notes` column (see db.VIEWER_MASKED_COLUMNS). Explicit rather than an
+#: empty string, so a masked result reads as "hidden", not as "this person
+#: wrote nothing".
+_MASKED_NOTE: Final = "[notes masked for this role]"
+
+
 def _build(ctx: SecurityContext, db_path: Path | str) -> NoteIndex:
     """Read one tenant's notes through the guarded connection and embed them into a new index."""
     with tenant_connection(ctx, db_path) as con:
@@ -169,7 +176,10 @@ def _build(ctx: SecurityContext, db_path: Path | str) -> NoteIndex:
             name=str(r["name"]),
             department=str(r["department"]),
             tenant_id=str(r["tenant_id"]),
-            text=str(r["notes"]),
+            # NULL only ever means "masked for this role": the column is
+            # `NOT NULL DEFAULT ''` in the base table, so a real note is never
+            # NULL -- it can be empty, but that is a different, unmasked value.
+            text=_MASKED_NOTE if r["notes"] is None else str(r["notes"]),
         )
         for r in rows
     ]
@@ -183,18 +193,34 @@ def _build(ctx: SecurityContext, db_path: Path | str) -> NoteIndex:
     return NoteIndex(ctx.tenant_id, notes, vectors)
 
 
-def get_index(ctx: SecurityContext, db_path: Path | str = DEFAULT_DB_PATH) -> NoteIndex:
-    """Return this tenant's index, building it on first use.
+def _cache_key(ctx: SecurityContext) -> tuple[str, str]:
+    """(tenant, role): what an index's *content* actually depends on.
 
-    Keyed by tenant id, so one tenant's cached index can never be served to
-    another. Building takes a couple of seconds for a thousand notes, which is
-    why it is cached rather than done per query.
+    Keying by tenant alone was a masking bypass waiting to happen: a viewer
+    and an analyst from the same tenant would share one cached index, so
+    whichever of them triggered the build first decided what the other one
+    searched -- real note text for a viewer if an analyst asked first, or
+    :data:`_MASKED_NOTE` garbage for an analyst if a viewer did. Role is part
+    of the cache key for the same reason it is part of the view: the content
+    behind ``ctx`` is not determined by tenant alone.
     """
+    return (ctx.tenant_id, ctx.role)
+
+
+def get_index(ctx: SecurityContext, db_path: Path | str = DEFAULT_DB_PATH) -> NoteIndex:
+    """Return this tenant-and-role's index, building it on first use.
+
+    Keyed by :func:`_cache_key`, so one tenant's cached index can never be
+    served to another, and one role's cannot be served to another either.
+    Building takes a couple of seconds for a thousand notes, which is why it
+    is cached rather than done per query.
+    """
+    key = _cache_key(ctx)
     with _lock:
-        index = _indexes.get(ctx.tenant_id)
+        index = _indexes.get(key)
         if index is None:
             index = _build(ctx, db_path)
-            _indexes[ctx.tenant_id] = index
+            _indexes[key] = index
         return index
 
 

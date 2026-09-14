@@ -1,0 +1,32 @@
+# One-command deployment onto a single machine.
+#
+# CI (.github/workflows/ci.yml) stops at publishing an image to
+# ghcr.io/ybazylbe/secure-rls on every push to main -- that is a release, not
+# a deployment: nothing is running anywhere as a result of it. This is what
+# turns the published image into a running service: it pulls that image (or
+# builds it locally if you edit the source), wires it to the model host, and
+# restarts it if the process dies.
+#
+#   docker compose up -d        # pulls ghcr.io/ybazylbe/secure-rls:latest and runs it
+#   docker compose up -d --build  # builds from this checkout instead
+#
+# Needs Ollama reachable at OLLAMA_HOST -- running on the host machine (the
+# default below) or as its own service if you add one here.
+services:
+  app:
+    image: ghcr.io/ybazylbe/secure-rls:latest
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      # Left unset is fine for a one-off demo: app.py signs sessions with a
+      # fresh key per process in that case, which is exactly why they do not
+      # survive a restart without this set to something stable.
+      SECURE_RLS_SECRET: ${SECURE_RLS_SECRET:-}
+      OLLAMA_HOST: ${OLLAMA_HOST:-http://host.docker.internal:11434}
+    extra_hosts:
+      # Docker Desktop (macOS/Windows) resolves host.docker.internal on its
+      # own; plain Linux needs the mapping spelled out to reach a model
+      # running on the host rather than in a container.
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped

@@ -34,28 +34,37 @@ uvicorn app:app --port 8000            # open http://localhost:8000
 For front-end work, run `npm --prefix web run dev` alongside the API and open
 http://localhost:5173 instead; Vite proxies `/api` to port 8000.
 
-Or in a container, which CI builds and publishes on every push to `main`:
+Or deploy the container CI publishes to `ghcr.io/ybazylbe/secure-rls` on every
+push to `main` — publishing it is as far as CI goes; this is what actually runs
+it, in one command:
 
 ```bash
-docker build -t secure-rls .
-docker run -p 8000:8000 secure-rls     # or ghcr.io/ybazylbe/secure-rls:latest
+docker compose up -d              # pulls the published image and runs it
+docker compose up -d --build      # or builds from this checkout instead
 ```
 
-The image contains no model. It reaches Ollama at `OLLAMA_HOST`, which defaults
-to `http://host.docker.internal:11434`. Set `SECURE_RLS_SECRET` to keep sessions
-valid across restarts; without it each process signs with a fresh key.
+Equivalent to `docker run` with the same two environment variables, checked in
+as [`docker-compose.yml`](docker-compose.yml) rather than left as a paragraph
+to copy. The image contains no model. It reaches Ollama at `OLLAMA_HOST`, which
+defaults to `http://host.docker.internal:11434`. Set `SECURE_RLS_SECRET` to
+keep sessions valid across restarts; without it each process signs with a
+fresh key.
 
 ### Sign in
 
-| user | password | tenant | rows visible |
-| --- | --- | --- | --- |
-| `alice` | `acme-demo-2026` | acme | 450 |
-| `arthur` | `acme-demo-2026` | acme | 450 |
-| `bob` | `beta-demo-2026` | beta | 330 |
-| `gita` | `gamma-demo-2026` | gamma | 220 |
+| user | password | tenant | role | rows visible |
+| --- | --- | --- | --- | --- |
+| `alice` | `acme-demo-2026` | acme | analyst | 450 |
+| `arthur` | `acme-demo-2026` | acme | viewer | 450 |
+| `bob` | `beta-demo-2026` | beta | analyst | 330 |
+| `gita` | `gamma-demo-2026` | gamma | analyst | 220 |
 
 `alice` and `arthur` share a tenant on purpose: the boundary is the tenant, not
-the individual. Passwords are stored as argon2id hashes.
+the individual. `arthur`'s role also does something you can see: sign in as
+`arthur` and ask for salaries — every row comes back with `salary` and `notes`
+as `null`, the same 450 rows `alice` sees otherwise. See [Column-level masking
+for a role](#column-level-masking-for-a-role). Passwords are stored as argon2id
+hashes.
 
 ### What to try first
 
@@ -85,7 +94,7 @@ Five layers. The prompt is not one of them.
 | | Layer | Where | What it stops |
 | --- | --- | --- | --- |
 | **L1** | Identity | [`secure_rls/security/context.py`](secure_rls/security/context.py) | The tenant comes from the session. No tool takes a tenant, user or scope argument, so there is nothing for the model to forge or be argued into changing. |
-| **L2** | Physical | [`db.py`](db.py) | Each session gets a read-only connection whose only visible relation is a temporary view of its own tenant. The filter is in the view, not in the query. |
+| **L2** | Physical | [`db.py`](db.py) | Each session gets a read-only connection whose only visible relation is a temporary view of its own tenant, with any column its role masks replaced by `NULL`. The filter — and the mask — is in the view, not in the query. |
 | **L3** | Kernel | [`secure_rls/security/authorizer.py`](secure_rls/security/authorizer.py) | An SQLite authorizer allows the base table to be read *only* while expanding that view. `ATTACH`, `PRAGMA`, writes, DDL and non-allowlisted functions are refused below the SQL layer. |
 | **L4** | Validation | [`secure_rls/security/sql_guard.py`](secure_rls/security/sql_guard.py) | Generated SQL is parsed with `sqlglot` and checked on the AST: one read-only statement, allowlisted tables and functions, a row cap, and a tenant predicate injected into every scope. |
 | **L5** | Egress | [`secure_rls/security/egress.py`](secure_rls/security/egress.py) | Every result set is checked for foreign tenant ids before it is returned. In a correct system it never fires, which is exactly why it is worth having. |
@@ -117,6 +126,68 @@ SELECT load_extension('evil.so')  →  not authorized to use function
 See [`docs/THREAT_MODEL.md`](docs/THREAT_MODEL.md) for what is in scope, what is
 not, and why.
 
+### Why the agent is told *not* to filter
+
+The task brief sketches the opposite design: *"LLM prompts enforce RLS (e.g.,
+'Always filter by current_tenant')."* This project does the reverse — the
+prompt says the data is already restricted and tells the model not to add a
+filter of its own — because "always filter" is a control a model can fail at
+in three ordinary ways: forgetting, being argued out of it by an injected note,
+or losing the instruction once the context window fills. None of those are
+risks worth carrying when the alternative is not asking the model at all. The
+proof is not hypothetical:
+[`tests/test_isolation.py`](tests/test_isolation.py) and
+[`tests/test_sql_guard.py`](tests/test_sql_guard.py) assert the tenant boundary
+with no system prompt, no agent graph and no model anywhere in the loop —
+there is nothing in either test a prompt instruction could have changed,
+because the boundary sits two layers below anywhere a prompt could reach.
+
+### Why the tenant id is a literal, not a bound parameter
+
+The brief's own sketch writes the filter as `AND tenant_id = ?` — a bound
+parameter. The per-tenant view can't be built that way: SQLite views take no
+parameters at all, so the id has to be spelled into the view's SQL text one way
+or another regardless of design. What makes that safe is not escaping, it is
+that the value can never be attacker-controlled to begin with:
+[`SecurityContext`](secure_rls/security/context.py) accepts only `acme`,
+`beta` or `gamma` and refuses everything else *before* any SQL is built —
+[`tests/test_isolation.py::test_unknown_tenants_are_refused_at_construction`](tests/test_isolation.py)
+tries `acme' OR '1'='1'` and `acme; DROP TABLE employees_all` among others,
+and both are rejected at that point, not at the database. A bound parameter
+protects a query built from a value that *could* be anything; a closed
+allowlist checked before construction removes the "could be anything"
+instead. (L4's rewrite of the *query* — the predicate it adds on top of the
+view — is closer to the brief's sketch: an equality node built on the parsed
+AST, not string concatenation. It still renders back to a literal, for a
+different, simpler reason: the same text is what the reasoning trace shows the
+user as "the SQL that ran," and showing `?` there while a resolved value
+actually executed would make the trace describe a different statement than
+the one it claims to.)
+
+### Column-level masking for a role
+
+Tenant isolation answers "which rows" at the tenant's grain. A real deployment
+usually needs a narrower grain too — a manager who should see only their own
+department, an individual who should see only their own row, a role that
+should see fewer *columns* of rows it can otherwise see in full. This project
+demonstrates the last of those: accounts with the `viewer` role (`arthur`,
+alongside `alice`'s `analyst` on the same `acme` tenant) get `salary` and
+`notes` back as `NULL` on every row, enforced the same way the tenant filter
+is — in the view itself (`VIEWER_MASKED_COLUMNS` in [`db.py`](db.py)), not by
+a tool declining to display a column or a prompt asking the model not to
+mention one. Because the view's own `SELECT` list never names a masked column
+for that role, the SQLite authorizer never sees a read of
+`employees_all.salary` on a viewer's connection at all — the value is not
+withheld after being fetched, it is never fetched. The note index respects the
+same boundary: it is cached per `(tenant, role)` rather than per tenant, so a
+viewer can never be served an analyst's already-built index of real note text
+(or the reverse).
+
+This is one demonstration, not a role system — there is no per-department or
+per-row scoping here, and nothing in CLAUDE.md asks for one. What it shows is
+that the mechanism generalises: a view is a natural place to encode "who may
+see what" at whatever grain a real deployment needs, tenant and column alike.
+
 ### Identity above the layers
 
 The five layers protect a connection that already knows who is asking. They
@@ -138,11 +209,14 @@ account table, so a client cannot assert a tenant however it edits a request.
 
 ### Retrieval
 
-Semantic search over the free-text `notes` column uses **one index per tenant**,
-not one index with a metadata filter. A foreign note is never embedded into a
-structure the caller can search, so isolation is a property of what exists
-rather than of a parameter someone has to remember to pass. The trade-off, and
-what would change at ten thousand tenants, is in
+Semantic search over the free-text `notes` column uses **one index per
+(tenant, role)**, not one index with a metadata filter. A foreign note is
+never embedded into a structure the caller can search, so isolation is a
+property of what exists rather than of a parameter someone has to remember to
+pass. Role is part of the cache key for the same reason: keyed by tenant
+alone, a viewer and an analyst from the same tenant would share whichever one
+of them happened to trigger the build first. The trade-off, and what would
+change at ten thousand tenants, is in
 [`secure_rls/rag/index.py`](secure_rls/rag/index.py).
 
 ### Prompt injection, planted on purpose
@@ -324,20 +398,21 @@ app.py            the app: FastAPI API (sessions, chat, side-by-side, attacks, a
                   and, once web/ is built, the React front end
 web/              React + TypeScript front end (Vite, Tailwind, Radix, lucide)
 agent.py          LangGraph agent — plan, act, observe. Not security-critical.
-db.py             storage, per-tenant views, read-only connections (L2)
+db.py             storage, per-tenant+role views, read-only connections (L2)
 employees.csv     1000 rows, 3 tenants, seeded, with planted outliers and injections
+docker-compose.yml  the deployment CI's release stops short of; `docker compose up -d`
 secure_rls/
   security/       the five layers' code (L1, L3, L4, L5) and the audit trail
   tools/          query_db, stats, plot, detect_anomalies, search_notes;
                   no schema mentions a tenant
-  rag/            per-tenant vector indexes
+  rag/            per-tenant, per-role vector indexes
   llm/            the three models, their origin and licence
   auth.py         argon2id sign-in — the one place a tenant is decided
   redteam.py      the attack catalogue and the containment verdict
   oracle.py       independent ground truth for the verdict
   grounding.py    checks that figures in an answer came from a tool
 evals/            golden questions, attack runner, model benchmark
-tests/            375 tests; none needs a model
+tests/            390 tests; none needs a model
 docs/             threat model, evaluation method, benchmark, demo script
 .claude/          project rules, a security-review subagent, two commands, a hook
 ```
@@ -362,6 +437,16 @@ gate on isolation at all.
 pulls a model and runs the attack suite weekly and on demand. It fails only on a
 leak — a model that answers worse is a procurement decision, a model that leaks
 is a defect.
+
+**What CI does not do is deploy anything.** Publishing an image to a registry
+is a release: it makes a new version available, and nothing about it is
+running anywhere as a result. [`docker-compose.yml`](docker-compose.yml) is
+the deployment half — the one command that turns that published image into a
+service on a machine (`docker compose up -d`) — checked in rather than left as
+a paragraph to copy. There is no CD job in this repository that deploys it
+anywhere on its own, because there is no server for this project to deploy to;
+calling the registry push "deployment" would have been the easy, dishonest
+answer.
 
 ## Agentic development
 

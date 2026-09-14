@@ -24,6 +24,8 @@ from __future__ import annotations
 import os
 import secrets
 import time
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Annotated, Any
 
@@ -71,7 +73,21 @@ _peer_signer = URLSafeTimedSerializer(SECRET, salt="peer-session")
 
 STATIC_DIR = Path(__file__).parent / "web" / "dist"
 
-app = FastAPI(title="Secure RLS Analyst", docs_url="/api/docs")
+
+@asynccontextmanager
+async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
+    """On startup, load employees.csv into SQLite if it is not loaded yet.
+
+    ``@app.on_event("startup")`` is deprecated in the FastAPI/Starlette version
+    this project pins; a lifespan context manager is the replacement and, used
+    as a context manager, is also what ``tests/test_api.py`` relies on to make
+    this run on a clean checkout with no database on disk yet.
+    """
+    db.init_db()
+    yield
+
+
+app = FastAPI(title="Secure RLS Analyst", docs_url="/api/docs", lifespan=_lifespan)
 
 
 # ---------------------------------------------------------------------------
@@ -217,12 +233,6 @@ def _answer_payload(answer: AgentAnswer, ctx: SecurityContext) -> dict[str, Any]
 # ---------------------------------------------------------------------------
 # Routes
 # ---------------------------------------------------------------------------
-
-
-@app.on_event("startup")
-def _load_data() -> None:
-    """On startup, load employees.csv into SQLite if it is not loaded yet."""
-    db.init_db()
 
 
 @app.post("/api/login")

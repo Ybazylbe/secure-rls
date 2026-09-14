@@ -35,7 +35,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 import db
 from agent import AgentAnswer, Step, ask, build_agent
-from secure_rls.auth import authenticate, demo_accounts
+from secure_rls.auth import USER_IDS, account_for, authenticate, demo_accounts
 from secure_rls.llm import DEFAULT_MODEL, MODELS
 from secure_rls.redteam import (
     ATTACKS,
@@ -88,14 +88,13 @@ def _context_from_cookie(
     except BadSignature as err:
         raise HTTPException(status_code=401, detail=f"invalid {what}") from err
 
-    for name, tenant in demo_accounts():
-        if name == username:
-            from secure_rls.auth import USER_IDS
-
-            return SecurityContext(
-                user_id=USER_IDS[name], username=name, tenant_id=tenant, role="analyst"
-            )
-    raise HTTPException(status_code=401, detail="unknown account")
+    account = account_for(username)
+    if account is None:
+        raise HTTPException(status_code=401, detail="unknown account")
+    tenant, role = account
+    return SecurityContext(
+        user_id=USER_IDS[username], username=username, tenant_id=tenant, role=role
+    )
 
 
 Session = Annotated[str | None, Cookie(alias=COOKIE)]

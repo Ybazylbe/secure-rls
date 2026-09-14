@@ -97,6 +97,20 @@ def test_a_session_reports_the_account_s_own_tenant(client: TestClient) -> None:
     assert body == {"username": "bob", "tenant": "beta", "role": "analyst", "rows": 330}
 
 
+def test_a_viewer_s_role_survives_rebuilding_the_session_from_the_cookie(
+    client: TestClient,
+) -> None:
+    """The cookie carries only a username; the role must be looked up again, not assumed.
+
+    Every request after login rebuilds the SecurityContext from the cookie
+    alone. An earlier version hardcoded role="analyst" while doing it, so
+    arthur -- whose account is "viewer" -- had the right role only in the
+    login response and "analyst" on every request after.
+    """
+    sign_in(client, "arthur", "acme-demo-2026")
+    assert client.get("/api/session").json()["role"] == "viewer"
+
+
 def test_a_forged_cookie_is_refused(client: TestClient) -> None:
     """The cookie is signed, not encrypted: readable, but not writable.
 

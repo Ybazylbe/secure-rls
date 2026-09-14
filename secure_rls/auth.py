@@ -87,3 +87,18 @@ def authenticate(username: str, password: str) -> SecurityContext | None:
 def demo_accounts() -> tuple[tuple[str, str], ...]:
     """(username, tenant) pairs, for the login screen's hint text."""
     return tuple((u.username, u.tenant_id) for u in _USERS.values())
+
+
+def account_for(username: str) -> tuple[str, str] | None:
+    """(tenant, role) for a known account, or ``None``.
+
+    Used to rebuild a :class:`SecurityContext` from a signed session cookie,
+    which carries a username and nothing else. An earlier version looked the
+    username up in :func:`demo_accounts` -- (username, tenant) pairs only --
+    and hardcoded every rebuilt context to role "analyst". `arthur`, whose
+    account is "viewer", got "analyst" back on every request after the first:
+    the tenant boundary held, but the role the rest of the system relies on
+    did not survive a page reload.
+    """
+    user = _USERS.get(username)
+    return (user.tenant_id, user.role) if user is not None else None

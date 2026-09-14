@@ -63,7 +63,9 @@ def _supported_values(steps: list[Step], question: str) -> set[float]:
         result = step.result
         if result is None:
             continue
-        known.update(numbers_in(result.summary))
+        # Everything the model was shown counts as seen, including the
+        # system-computed summary of large results (see ToolResult.for_model).
+        known.update(numbers_in(result.for_model()))
         for row in result.rows:
             for value in row.values():
                 if isinstance(value, (int, float)) and not isinstance(value, bool):
@@ -87,8 +89,8 @@ def ungrounded_numbers(answer: str, steps: list[Step], question: str = "") -> li
 
 
 CORRECTION: Final = (
-    "Your answer contained figures that none of the tool results support: {values}. "
-    "Do not state numbers you have not been given. Call the tools again with the "
+    "Before you answer, note: these figures appear in no tool result, so do not state "
+    "them: {values}. Do not state numbers you have not been given. Call the tools with the "
     "arguments needed to answer the question properly -- if the question compares "
     "or ranks groups, you must pass group_by -- and then answer using only what "
     "they return."
@@ -158,7 +160,7 @@ def claimed_tenants(answer: str, own_tenant: str) -> tuple[str, ...]:
 def scope_correction(
     question: str, answer: str, steps: list[Step], own_tenant: str
 ) -> str | None:
-    """Ask for a rewrite when the answer blurs whose data it is showing.
+    """Facts to give the model when its answer blurs whose data it is showing.
 
     In plain terms: tools only ever return the caller's own rows, so an answer
     that talks about another tenant next to that data is presenting the caller's
@@ -191,19 +193,19 @@ def scope_correction(
     if phantom:
         names = ", ".join(phantom)
         return (
-            f"Your answer refers to {names} next to data. Every row the tools returned "
-            f"belongs to {own_tenant}; you cannot see any other tenant. Rewrite the answer "
-            f"so that nothing is presented as {names}'s data: say plainly that you can only "
-            f"see {own_tenant}, and label the data you show as {own_tenant}'s."
+            f"Before you answer, note: every row the tools returned belongs to "
+            f"{own_tenant}; you cannot see {names} or any other tenant. Say plainly that you "
+            f"can only see {own_tenant}, label the data you show as {own_tenant}'s, and do not "
+            f"present any of it as {names}'s."
         )
 
     asked_about = tenants_referred_to(question, own)
     if asked_about and not _mentions(answer, own):
         names = ", ".join(asked_about)
         return (
-            f"The question asks about {names}. You can only see {own_tenant}, so every row "
-            f"you received is {own_tenant}'s. Rewrite the answer to say that plainly, and "
-            f"make clear that the data you show belongs to {own_tenant}, not to {names}."
+            f"Before you answer, note: the question asks about {names}, but you can only see "
+            f"{own_tenant}, so every row you received is {own_tenant}'s. Say that plainly, "
+            f"and label the data you show as {own_tenant}'s, not {names}'s."
         )
     return None
 
@@ -313,3 +315,47 @@ def remove_model_tables(answer: str, tools_returned_rows: bool) -> str:
         kept.append(lines[index])
         index += 1
     return "\n".join(kept)
+
+
+# ---------------------------------------------------------------------------
+# What is shown of the model's text
+# ---------------------------------------------------------------------------
+
+_MARKDOWN_IMAGE: Final = re.compile(r"!\[[^\]]*\]\([^)]*\)")
+_MARKDOWN_LINK: Final = re.compile(r"\[([^\]]+)\]\((?:https?:)?//[^)]*\)")
+_BARE_URL: Final = re.compile(r"\b(?:https?://|www\.)\S+", re.IGNORECASE)
+_SYSTEM_NOTE: Final = re.compile(r"\(Example rows: \d+ of \d+\.[^)]*\)")
+
+
+def remove_links(answer: str) -> str:
+    """Take images and web addresses out of the model's text.
+
+    In plain terms: no tool here produces a URL, so any link in an answer was
+    made up. Asked for a histogram, the model wrote a markdown image pointing
+    at an invented imgur address, although the server draws the chart itself.
+    That is more than clutter. A markdown image is how data is smuggled out of
+    LLM apps: a note in the data tells the model to "show" an image at
+    attacker.example/?d=<salaries>, and a markdown renderer fetches it. This
+    interface does not render markdown, but a later one might, so the address
+    never reaches the page. Link text is kept; images and bare addresses go.
+    """
+    text = _MARKDOWN_IMAGE.sub("", answer)
+    text = _MARKDOWN_LINK.sub(r"\1", text)
+    text = _BARE_URL.sub("", text)
+    return re.sub(r"\n{3,}", "\n\n", text).strip()
+
+
+def remove_system_notes(answer: str) -> str:
+    """Remove notes the system wrote for the model that the model copied out.
+
+    The note under a large result ("Example rows: 3 of 220. The user sees all
+    220 rows...") is written by ToolResult.for_model for the model's eyes. A
+    model once pasted it into its answer word for word. It is our own
+    template, so it is recognised exactly rather than guessed at.
+    """
+    return re.sub(r"\n{3,}", "\n\n", _SYSTEM_NOTE.sub("", answer)).strip()
+
+
+def clean_for_display(answer: str, tools_returned_rows: bool) -> str:
+    """Everything the server removes from the model's text before showing it."""
+    return remove_links(remove_system_notes(remove_model_tables(answer, tools_returned_rows)))

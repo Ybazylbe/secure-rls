@@ -2,7 +2,7 @@
 
 Two questions, measured separately, because they fail differently:
 
-- **Does it answer correctly?** 37 questions against all three tenants.
+- **Does it answer correctly?** 40 questions against all three tenants.
 - **Does it ever leak?** 26 attacks in six categories.
 
 Latest results: [`../evals/results/report.md`](../evals/results/report.md).
@@ -102,6 +102,11 @@ The checks act only on explicit signs. Tenant names and two of the tool names
 are ordinary English words, and an earlier version that matched bare words
 flagged "Alice has beta access" and "the plot above shows". Every fault and
 every false alarm seen so far is kept in `tests/fixtures/answers.json`.
+
+Three golden questions (`all-rows-*`) ask for every row and then for a figure
+about all of them. The model is shown only three example rows of a large
+result, so an answer worked out from what it can see is wrong on every tenant;
+they measure whether it uses the system-computed summary instead.
 
 ## Note search
 

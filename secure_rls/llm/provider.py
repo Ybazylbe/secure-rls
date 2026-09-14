@@ -66,6 +66,16 @@ CONTEXT_TOKENS: Final = 16_384
 
 OLLAMA_HOST: Final = os.environ.get("OLLAMA_HOST", "http://127.0.0.1:11434")
 
+#: Upper bound on the length of one model reply, in tokens (roughly 750 words).
+#: Without it nothing stopped a reply: asked for "every tenant's payroll" with
+#: 450 rows in front of it, a model generated for over eight minutes and would
+#: only have stopped at the 16k context limit, with the UI spinning throughout.
+MAX_REPLY_TOKENS: Final = 1024
+
+#: How long one request to the model may take before it is abandoned. A backstop
+#: for a stuck server; the token cap above is what normally ends a long reply.
+REQUEST_TIMEOUT_SECONDS: Final = 180
+
 
 def build_llm(model: str = DEFAULT_MODEL, *, temperature: float = 0.0, **kwargs: Any) -> Any:
     """Return a chat model bound to the local Ollama server.
@@ -84,6 +94,8 @@ def build_llm(model: str = DEFAULT_MODEL, *, temperature: float = 0.0, **kwargs:
         model=model,
         temperature=temperature,
         num_ctx=CONTEXT_TOKENS,
+        num_predict=MAX_REPLY_TOKENS,
         base_url=OLLAMA_HOST,
+        client_kwargs={"timeout": REQUEST_TIMEOUT_SECONDS},
         **kwargs,
     )

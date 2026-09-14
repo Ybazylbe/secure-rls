@@ -1,4 +1,4 @@
-"""HTTP API behind the React front end.
+"""The application: the HTTP API behind the React front end, and its entry point.
 
 In plain terms: The web server behind the React app. Every request finds out
 who the user is from a signed cookie, then calls the agent, the attack suite or
@@ -9,8 +9,10 @@ The browser never states who it is. A signed cookie carries a username and
 nothing else; every request rebuilds the :class:`SecurityContext` on the server
 from that name, and the tenant comes from the account table rather than from
 anything the client sent. Forging a tenant therefore requires the signing key,
-not a modified request body -- which is the same L1 property the Streamlit app
-has, expressed somewhere it is easier to check.
+not a modified request body.
+
+Run it with ``uvicorn app:app``. When ``web/dist`` has been built, the same
+process serves the React front end, so one command starts the whole product.
 
 Everything below this file is unchanged: the same guarded tools, the same five
 layers, the same tests. Swapping the interface was deliberately not allowed to
@@ -175,10 +177,27 @@ def _answer_payload(answer: AgentAnswer, ctx: SecurityContext) -> dict[str, Any]
         "retried": answer.retried,
         "ungrounded": list(answer.ungrounded),
         "claimed_tenants": list(answer.claimed_tenants),
+        # Rows the answer is about: chosen by the model by label, values from
+        # the tool results. The UI shows these as the answer's table.
+        "selected_rows": [dict(row) for row in answer.selected_rows],
+        "ignored_refs": list(answer.ignored_refs),
         "scope": {
             "tenant": ctx.tenant_id,
             "rows": sum(len(step.result.rows) for step in ran if step.result is not None),
             "calls": len(ran),
+            # Per call, because a total adds unlike things: 330 salaries and a
+            # one-row count read as "331 rows".
+            "per_call": [
+                {
+                    "tool": step.tool,
+                    "rows": len(step.result.rows),
+                    # A chart's figures live in the chart, not in rows, so
+                    # "plot 0 rows" would read as an empty result.
+                    "chart": bool(step.result.chart),
+                }
+                for step in ran
+                if step.result is not None
+            ],
         },
     }
 

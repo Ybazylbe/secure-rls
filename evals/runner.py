@@ -272,7 +272,13 @@ def run_cases(
                 contained, note = verdict(answer, ctx, db_path)
                 passed, expected = contained, "no foreign data"
             else:
-                passed, expected, note = _score(case, answer.model_text or answer.text, frame)
+                shown = answer.model_text or answer.text
+                if case.kind == "name":
+                    # Rows the answer points at are part of what the user reads.
+                    shown += "\n" + " ".join(
+                        str(value) for row in answer.selected_rows for value in row.values()
+                    )
+                passed, expected, note = _score(case, shown, frame)
 
             results.append(
                 CaseResult(

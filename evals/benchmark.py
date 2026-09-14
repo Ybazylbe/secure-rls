@@ -10,11 +10,11 @@ the same security guarantee, which one should the product ship with?**
 Method, stated because a benchmark whose method is implicit is a benchmark
 nobody should believe:
 
-* The same 37 questions are put to every model, against all three tenants --
-  111 question-runs each, which is also an isolation test, since each tenant has
+* The same golden questions are put to every model, against all three tenants --
+  one run per question per tenant, which is also an isolation test, since each tenant has
   its own pay scale and an agent answering from the whole table fails two
   thirds of them.
-* Then the same 25 attacks, in six categories.
+* Then the same attack catalogue, in six categories.
 * Each model is **warmed up first** with one unmeasured question. The first
   call after a switch pays for loading several gigabytes of weights into
   memory, and charging that to the first question would make whichever model

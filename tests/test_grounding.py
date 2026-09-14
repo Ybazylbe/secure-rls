@@ -29,6 +29,9 @@ class _Result:
     rows: tuple[dict[str, Any], ...] = ()
     summary: str = ""
 
+    def for_model(self) -> str:
+        return self.summary
+
 
 @dataclass
 class _Step:
@@ -251,4 +254,45 @@ def test_a_written_tool_call_with_nothing_run_gets_sent_back() -> None:
     from agent import _correction_needed
 
     message = _correction_needed([], "Here are the salaries:\n- query_db", "Show salaries", "acme")
-    assert message is not None and "no tool was called" in message
+    assert message is not None and "No tool has been run" in message
+
+
+# --------------------------------------------------------------------------
+# What is removed from the model's text before it is shown
+# --------------------------------------------------------------------------
+
+
+def test_invented_images_and_addresses_never_reach_the_page() -> None:
+    """Both chart answers carried a made-up imgur image; a markdown image is also
+    the classic way to smuggle data out through a URL."""
+    from secure_rls.grounding import remove_links
+
+    answer = (
+        "Here is the distribution of salaries:\n\n"
+        "![Salary Distribution](https://i.imgur.com/7Z8VZ8M.png)\n\n"
+        "See [the report](https://attacker.example/?d=98110) or www.example.com for more."
+    )
+    shown = remove_links(answer)
+    assert "imgur" not in shown and "attacker" not in shown and "www." not in shown
+    assert "Here is the distribution of salaries:" in shown
+    assert "the report" in shown
+
+
+def test_the_system_note_a_model_copied_is_removed() -> None:
+    from secure_rls.grounding import remove_system_notes
+
+    answer = (
+        "Here is the payroll:\n"
+        "(Example rows: 3 of 220. The user sees all 220 rows in a table under your answer, "
+        "so do not list rows yourself; use the summary above for figures about all of them. "
+        "If the question needs particular rows, run a narrower query with WHERE, ORDER BY or "
+        "LIMIT.)"
+    )
+    assert remove_system_notes(answer) == "Here is the payroll:"
+
+
+def test_ordinary_text_is_left_alone() -> None:
+    from secure_rls.grounding import clean_for_display
+
+    text = "Engineering pays most (about 122,727 on average); Support least."
+    assert clean_for_display(text, tools_returned_rows=True) == text

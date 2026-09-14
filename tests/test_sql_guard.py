@@ -108,6 +108,60 @@ def test_hostile_or_invalid_sql_is_refused(sql: str, expected_reason: str) -> No
 
 
 # --------------------------------------------------------------------------
+# Asking for another tenant by name
+# --------------------------------------------------------------------------
+
+FOREIGN_TENANT_FILTERS = [
+    pytest.param("SELECT salary FROM employees WHERE tenant_id = 'beta'", id="equals"),
+    pytest.param("SELECT salary FROM employees WHERE 'gamma' = tenant_id", id="equals-reversed"),
+    pytest.param(
+        "SELECT salary FROM employees WHERE tenant_id IN ('beta', 'gamma')", id="in-list"
+    ),
+    pytest.param(
+        "SELECT salary FROM employees WHERE tenant_id IN ('acme', 'beta')", id="in-list-mixed"
+    ),
+    pytest.param(
+        "SELECT * FROM (SELECT * FROM employees WHERE tenant_id = 'beta') AS t", id="subquery"
+    ),
+    pytest.param("SELECT * FROM employees WHERE tenant_id = 'xyz'", id="unknown-tenant"),
+    pytest.param("SELECT * FROM employees WHERE TENANT_ID = 'BETA'", id="case"),
+]
+
+
+@pytest.mark.parametrize("sql", FOREIGN_TENANT_FILTERS)
+def test_selecting_another_tenant_is_refused_with_a_reason_that_cannot_be_misread(
+    sql: str,
+) -> None:
+    """Refused, rather than rewritten into an empty result.
+
+    The rewrite alone turned ``tenant_id IN ('beta', 'gamma')`` into
+    ``... AND tenant_id = 'acme'``, which returned nothing -- and the model
+    reported that beta and gamma "have no employees". An empty result looks like
+    an answer; a refusal that says only acme is visible does not.
+    """
+    with pytest.raises(SqlGuardError) as excinfo:
+        guard(sql, ctx_for("acme"))
+    reason = excinfo.value.reason
+    assert "only query acme" in reason, reason
+    assert "says nothing about" in reason, reason
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "SELECT * FROM employees WHERE tenant_id = 'acme'",
+        "SELECT * FROM employees WHERE tenant_id IN ('acme')",
+        "SELECT * FROM employees WHERE tenant_id <> 'beta'",
+        "SELECT * FROM employees WHERE notes LIKE '%beta%'",
+        "SELECT * FROM employees WHERE name = 'beta'",
+    ],
+    ids=["own-equals", "own-in", "not-equal", "text-mentions-beta", "other-column"],
+)
+def test_filters_that_do_not_select_another_tenant_are_left_alone(sql: str) -> None:
+    guard(sql, ctx_for("acme"))
+
+
+# --------------------------------------------------------------------------
 # Rewrites
 # --------------------------------------------------------------------------
 

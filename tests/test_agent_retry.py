@@ -15,7 +15,7 @@ from typing import Any
 import httpx
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
-from agent import _without_final_reply, ask
+from agent import MAX_HISTORY_TURNS, _without_final_reply, ask
 from secure_rls.security.audit import AuditLog
 from secure_rls.security.context import SecurityContext
 
@@ -73,6 +73,43 @@ def test_a_model_that_never_replies_ends_the_question_with_a_message(db_path: Pa
     )
     assert "took too long" in answer.text
     assert answer.steps == []
+
+
+def test_prior_turns_are_shown_as_conversation_history(db_path: Path) -> None:
+    """A follow-up like "and in Sales?" needs the department the first turn set.
+
+    Only the question and the *displayed* answer text are replayed -- not the
+    tool calls that produced it -- so the model sees a normal-looking
+    conversation rather than a transcript of its own past tool use.
+    """
+    # No figures in the reply: a bare number with no tool call behind it would
+    # trigger the one-shot correction retry this test is not about.
+    agent = ScriptedAgent([AIMessage(content="Sales pays less on average than Engineering.")])
+    ask(
+        "And in Sales?", SecurityContext(1, "alice", "acme"), AuditLog(None),
+        db_path=db_path, agent=agent,
+        history=[("What is the average salary in Engineering?", "Engineering averages 120000.")],
+    )
+    sent = agent.received[0]
+    assert [type(m).__name__ for m in sent] == [
+        "SystemMessage", "HumanMessage", "AIMessage", "HumanMessage",
+    ]
+    assert sent[1].content == "What is the average salary in Engineering?"
+    assert sent[2].content == "Engineering averages 120000."
+    assert sent[3].content == "And in Sales?"
+
+
+def test_only_the_most_recent_turns_of_history_are_kept(db_path: Path) -> None:
+    """A long conversation must not grow the prompt without bound."""
+    agent = ScriptedAgent([AIMessage(content="ok")])
+    history = [(f"question {i}", f"answer {i}") for i in range(MAX_HISTORY_TURNS + 3)]
+    ask(
+        "the latest question", SecurityContext(1, "alice", "acme"), AuditLog(None),
+        db_path=db_path, agent=agent, history=history,
+    )
+    sent = agent.received[0]
+    humans = [str(m.content) for m in sent if isinstance(m, HumanMessage)]
+    assert humans == [q for q, _ in history[-MAX_HISTORY_TURNS:]] + ["the latest question"]
 
 
 def test_a_reply_cut_off_at_the_length_limit_says_so(db_path: Path) -> None:

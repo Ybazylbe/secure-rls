@@ -25,7 +25,7 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Annotated, Any, Final, TypedDict
@@ -63,6 +63,15 @@ MAX_STEPS = 6
 #: calls, and qwen2.5 was observed sending twenty-four rejected calls to the
 #: same tool inside the turn budget, taking 88 seconds to answer nothing.
 MAX_TOOL_CALLS = 12
+
+#: How many previous turns of this conversation are shown to the model.
+#: Without any history, "What is the average salary in Engineering?" followed
+#: by "And in Sales?" was answered as a question about nothing -- the second
+#: turn carries no department context of its own. Only the question and the
+#: displayed answer text are kept, not the tool calls that produced it: the
+#: model can re-derive numbers it needs by calling a tool again, and a bounded
+#: window keeps the prompt from growing without limit over a long conversation.
+MAX_HISTORY_TURNS: Final = 4
 
 SYSTEM_PROMPT = """\
 You are a data analyst for {tenant}. You answer questions about {tenant}'s \
@@ -401,13 +410,21 @@ def ask(
     db_path: Path | str = DEFAULT_DB_PATH,
     agent: Any | None = None,
     composer: Callable[[list[Any]], str] | None = None,
+    history: Sequence[tuple[str, str]] = (),
 ) -> AgentAnswer:
     """Put one question to the agent and collect the answer with its trace.
 
     ``composer`` sends the final-answer messages to a model and returns its JSON
     reply. It defaults to the configured model; tests pass a stand-in.
+
+    ``history`` is this conversation's earlier (question, displayed answer)
+    pairs, oldest first. Only the last :data:`MAX_HISTORY_TURNS` are shown --
+    see its docstring for why tool calls are not replayed. It carries no
+    security weight either way: it is prompt content like the question itself,
+    scoped to whatever this caller could already see, never a channel that
+    reaches another tenant's rows.
     """
-    from langchain_core.messages import HumanMessage, SystemMessage
+    from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
     agent = agent or build_agent(ctx, audit, model=model, db_path=db_path)
     system = SYSTEM_PROMPT.format(
@@ -418,7 +435,12 @@ def ask(
         sample=_sample_rows(ctx, db_path),
     )
     limits = {"recursion_limit": MAX_STEPS * 2 + 2}
-    state = {"messages": [SystemMessage(system), HumanMessage(question)], "steps": 0}
+    messages: list[AnyMessage] = [SystemMessage(system)]
+    for prior_question, prior_answer in history[-MAX_HISTORY_TURNS:]:
+        messages.append(HumanMessage(prior_question))
+        messages.append(AIMessage(prior_answer))
+    messages.append(HumanMessage(question))
+    state = {"messages": messages, "steps": 0}
 
     try:
         final = agent.invoke(state, limits)

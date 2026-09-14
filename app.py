@@ -36,7 +36,7 @@ from itsdangerous import BadSignature, URLSafeTimedSerializer
 from pydantic import BaseModel, ConfigDict, Field
 
 import db
-from agent import AgentAnswer, Step, ask, build_agent
+from agent import MAX_HISTORY_TURNS, AgentAnswer, Step, ask, build_agent
 from secure_rls.auth import USER_IDS, account_for, authenticate, demo_accounts
 from secure_rls.llm import DEFAULT_MODEL, MODELS
 from secure_rls.redteam import (
@@ -141,10 +141,25 @@ class LoginRequest(BaseModel):
     password: str
 
 
+class HistoryTurn(BaseModel):
+    """One earlier turn of the conversation, as the client already displayed it."""
+    model_config = ConfigDict(extra="forbid")
+    question: str = Field(min_length=1, max_length=2000)
+    answer: str = Field(min_length=1, max_length=4000)
+
+
 class AskRequest(BaseModel):
-    """Body of a chat question: the question text and which model to use."""
+    """Body of a chat question: the question, which model to use, and prior turns.
+
+    ``history`` is the client's own record of this conversation -- the same
+    question and answer text already shown on screen -- so a follow-up like
+    "and in Sales?" carries the department context the model otherwise has no
+    way to see. Capped at agent.MAX_HISTORY_TURNS: the agent only looks at
+    that many anyway, and this is one thing fewer for a client to get right.
+    """
     question: str = Field(min_length=1, max_length=2000)
     model: str = DEFAULT_MODEL
+    history: list[HistoryTurn] = Field(default_factory=list, max_length=MAX_HISTORY_TURNS)
 
 
 class CompareRequest(AskRequest):
@@ -298,7 +313,8 @@ def ask_question(body: AskRequest, secure_rls_session: Session = None) -> dict[s
     """Answer a chat question as the signed-in user."""
     ctx = _context_from_cookie(secure_rls_session)
     _check_model(body.model)
-    answer = ask(body.question, ctx, AUDIT, model=body.model)
+    history = [(turn.question, turn.answer) for turn in body.history]
+    answer = ask(body.question, ctx, AUDIT, model=body.model, history=history)
     return _answer_payload(answer, ctx)
 
 

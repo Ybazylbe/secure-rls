@@ -1,7 +1,7 @@
 import { ArrowUp, Bot, Loader2, User } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 
-import { api, type Answer } from "@/api";
+import { api, type Answer, type HistoryTurn } from "@/api";
 import { Charts } from "@/components/Chart";
 import { Data } from "@/components/Data";
 import { Grounding } from "@/components/Grounding";
@@ -11,6 +11,11 @@ import { cn } from "@/lib/utils";
 
 /** One question and the agent's answer to it. */
 export type Turn = { question: string; answer: Answer };
+
+/** How many prior turns are sent as context. Mirrors agent.MAX_HISTORY_TURNS
+ * on the backend, which ignores anything past its own window anyway; kept in
+ * step here only so the request does not carry turns nobody will read. */
+const HISTORY_WINDOW = 4;
 
 /** Example questions shown as buttons above the input box: [button label, question]. */
 const SUGGESTIONS: [string, string][] = [
@@ -49,7 +54,10 @@ export function Chat({
     setPending(question);
     setError(null);
     try {
-      onTurn({ question, answer: await api.ask(question, model) });
+      const history: HistoryTurn[] = turns
+        .slice(-HISTORY_WINDOW)
+        .map((turn) => ({ question: turn.question, answer: turn.answer.text }));
+      onTurn({ question, answer: await api.ask(question, model, history) });
     } catch (err) {
       setError(err instanceof Error ? err.message : "The request failed");
     } finally {

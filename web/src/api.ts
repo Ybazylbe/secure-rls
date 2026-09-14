@@ -6,6 +6,8 @@ export type Identity = { username: string; tenant: string; role: string; rows: n
 export type ModelSpec = { tag: string; origin: string; licence: string; note: string };
 /** A demo account listed on the sign-in page. */
 export type Account = { username: string; tenant: string; password: string };
+/** One earlier turn of the conversation, sent back so a follow-up question has context. */
+export type HistoryTurn = { question: string; answer: string };
 
 /** What happened to one tool call: ran, rejected by the schema, never sent, or ran with no recorded result. */
 export type StepState = "ok" | "rejected" | "skipped" | "unverifiable";
@@ -139,7 +141,13 @@ export const api = {
   logout: () => post<{ ok: boolean }>("/logout"),
   models: () => call<ModelSpec[]>("/models"),
   accounts: () => call<Account[]>("/accounts"),
-  ask: (question: string, model: string) => post<Answer>("/ask", { question, model }),
+  // `history` is this conversation's own prior turns -- question and the
+  // answer text already on screen -- so a follow-up like "and in Sales?"
+  // carries the department the first turn set. Capped to the same window the
+  // backend looks at (agent.MAX_HISTORY_TURNS); sending more would just be
+  // ignored there.
+  ask: (question: string, model: string, history: HistoryTurn[] = []) =>
+    post<Answer>("/ask", { question, model, history }),
   // The second side of the comparison is a real sign-in, never a tenant name:
   // the server only answers for an account whose password this browser gave.
   peer: () => call<Identity>("/compare/peer"),

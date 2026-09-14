@@ -103,6 +103,11 @@ REFUSED = [
         "RECURSIVE",
         id="recursive-cte",
     ),
+    pytest.param(
+        "SELECT group_concat(name || ':' || salary) FROM employees",
+        "function",
+        id="group-concat-bulk-extraction",
+    ),
 ]
 
 

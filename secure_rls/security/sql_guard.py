@@ -101,6 +101,7 @@ def guard(sql: str, ctx: SecurityContext, *, max_rows: int = MAX_ROWS) -> Guarde
     """
     statement = _parse_single(sql)
     _reject_forbidden_nodes(statement, sql)
+    _reject_recursive_ctes(statement, sql)
     cte_names = _cte_names(statement)
     _check_tables(statement, cte_names, sql)
     _check_functions(statement, sql)
@@ -164,6 +165,34 @@ def _reject_forbidden_nodes(statement: exp.Expression, sql: str) -> None:
         if isinstance(node, _FORBIDDEN_NODES):
             raise SqlGuardError(
                 f"statement kind {type(node).__name__.upper()} is not allowed", sql=sql
+            )
+
+
+def _reject_recursive_ctes(statement: exp.Expression, sql: str) -> None:
+    """Refuse ``WITH RECURSIVE`` outright.
+
+    Found by testing, not by reading the docs: a recursive CTE that never
+    touches ``employees`` at all (a plain number generator) is refused by the
+    SQLite authorizer (L3) with a generic "read of out-of-scope object" -- the
+    ephemeral relation the recursion builds has no name L3 recognises and no
+    `db_name` of ``temp``, so it falls through to the same deny path as an
+    actual out-of-scope table. Nothing leaks; the failure is just confusing,
+    and CLAUDE.md's own warning about L3 trusting a view name by nothing more
+    than its spelling is reason enough not to try to widen L3 to accommodate
+    it. This dataset is flat, so no legitimate question needs recursion; L4
+    forbids the shape before it ever reaches the connection.
+
+    Checked by walking node types rather than reading ``statement.args["with"]``:
+    sqlglot stores the clause under the key ``with_`` (the exact trap CLAUDE.md
+    already documents for ``from_`` in :func:`_local_tables`), so a
+    dictionary-key lookup here would silently see nothing to reject.
+    """
+    for clause in statement.find_all(exp.With):
+        if clause.args.get("recursive"):
+            raise SqlGuardError(
+                "WITH RECURSIVE is not allowed; this dataset has no hierarchy that needs "
+                "it -- write the query over 'employees' directly, or without recursion",
+                sql=sql,
             )
 
 

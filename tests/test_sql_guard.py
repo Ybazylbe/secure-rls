@@ -97,6 +97,12 @@ REFUSED = [
     pytest.param("SELECT ssn FROM employees", "column", id="unknown-column"),
     pytest.param("", "empty", id="empty"),
     pytest.param("this is not sql at all", "parse", id="garbage"),
+    pytest.param(
+        "WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c WHERE x < 10) "
+        "SELECT count(*) FROM c",
+        "RECURSIVE",
+        id="recursive-cte",
+    ),
 ]
 
 

@@ -27,8 +27,8 @@ def audit() -> AuditLog:
     return AuditLog(None)  # no file, buffer only
 
 
-def ctx_for(tenant: str) -> SecurityContext:
-    return SecurityContext(user_id=1, username=f"{tenant}_analyst", tenant_id=tenant)
+def ctx_for(tenant: str, role: str = "analyst") -> SecurityContext:
+    return SecurityContext(user_id=1, username=f"{tenant}_{role}", tenant_id=tenant, role=role)
 
 
 # --------------------------------------------------------------------------
@@ -69,6 +69,49 @@ def test_sql_tool_returns_only_own_rows(db_path: Path, tenant: str, audit: Audit
     assert {row["tenant_id"] for row in result.rows} == {tenant}
 
 
+# --------------------------------------------------------------------------
+# A role can be masked out of columns, not just tenants out of rows
+# --------------------------------------------------------------------------
+
+
+def test_a_viewer_never_receives_salary_or_notes_values(
+    db_path: Path, tenant: str, audit: AuditLog
+) -> None:
+    """Column-level masking, enforced in the view, not filtered by the tool.
+
+    Row-level security only at the tenant's grain answers "which rows" but not
+    "which columns of my own tenant's rows" -- a real per-role need one grain
+    down. `viewer` demonstrates the view can enforce that too: every row is
+    still the caller's own tenant, but two columns come back NULL regardless
+    of what SQL asks for them.
+    """
+    result = run_sql("SELECT * FROM employees", ctx_for(tenant, role="viewer"), audit, db_path)
+    assert not result.refused
+    assert result.rows, "the query itself must not be refused or empty"
+    assert all(row["salary"] is None for row in result.rows)
+    assert all(row["notes"] is None for row in result.rows)
+    # Masking is per-column, not per-row: everything else is untouched.
+    assert all(row["name"] and row["department"] for row in result.rows)
+
+
+def test_an_analyst_is_not_affected_by_the_viewer_mask(
+    db_path: Path, tenant: str, audit: AuditLog
+) -> None:
+    result = run_sql("SELECT salary FROM employees", ctx_for(tenant), audit, db_path)
+    assert not result.refused
+    assert all(row["salary"] is not None for row in result.rows)
+
+
+def test_a_viewer_cannot_recover_a_masked_column_by_naming_it_differently(
+    db_path: Path, audit: AuditLog
+) -> None:
+    """Masking happens in the view SQLite hands back, not by inspecting the model's query."""
+    for sql in ("SELECT salary FROM employees", "SELECT salary AS pay FROM employees LIMIT 1"):
+        result = run_sql(sql, ctx_for("acme", role="viewer"), audit, db_path)
+        assert not result.refused, sql
+        assert all(v is None for row in result.rows for v in row.values()), sql
+
+
 def test_sql_tool_reports_a_refusal_instead_of_raising(db_path: Path, audit: AuditLog) -> None:
     result = run_sql("SELECT * FROM employees_all", ctx_for("acme"), audit, db_path)
     assert result.refused
@@ -91,6 +134,25 @@ def test_a_multi_statement_reaching_the_database_is_refused_not_raised(
     result = run_sql(stacked, ctx_for("acme"), audit, db_path)
     assert result.refused
     assert not result.rows
+
+
+def test_an_unbounded_query_is_stopped_by_the_time_budget(
+    db_path: Path, audit: AuditLog
+) -> None:
+    """Row and shape checks alone do not stop a self cross join.
+
+    ``SELECT count(*) ...`` over four copies of the table names only
+    'employees', calls only allowlisted functions, and returns a single row --
+    every static check upstream passes it -- while asking SQLite to evaluate
+    roughly tenant_rows**4 combinations. A tiny query_timeout stands in for the
+    real budget so the test does not have to wait it out.
+    """
+    result = run_sql(
+        "SELECT count(*) FROM employees a, employees b, employees c, employees d",
+        ctx_for("acme"), audit, db_path, query_timeout=0.05,
+    )
+    assert result.refused
+    assert "time budget" in (result.reason or "")
 
 
 def test_aggregates_differ_between_tenants(db_path: Path, audit: AuditLog) -> None:
@@ -178,6 +240,31 @@ def test_each_tenant_gets_its_own_index(db_path: Path) -> None:
             index = get_index(ctx_for(tenant), db_path)
             assert index.tenants_present == {tenant}
             assert len(index) > 0
+    finally:
+        reset_indexes()
+
+
+@pytest.mark.slow
+def test_a_viewer_and_an_analyst_do_not_share_a_cached_index(db_path: Path) -> None:
+    """The cache key must be (tenant, role), not tenant alone.
+
+    Keyed by tenant only, whichever role asked first would decide what the
+    other one searched: an analyst's request built first would leave a viewer
+    searching real note text through a cache hit, and the reverse would leave
+    the analyst searching nothing but masked placeholders. Building the
+    analyst's index first is the case that actually matters -- it is the one
+    that would leak.
+    """
+    reset_indexes()
+    try:
+        analyst_index = get_index(ctx_for("acme"), db_path)
+        viewer_index = get_index(ctx_for("acme", role="viewer"), db_path)
+        assert analyst_index is not viewer_index
+
+        analyst_notes = {n.text for n in analyst_index._notes}  # test-only peek at the cache
+        viewer_notes = {n.text for n in viewer_index._notes}
+        assert viewer_notes == {"[notes masked for this role]"}
+        assert analyst_notes != viewer_notes
     finally:
         reset_indexes()
 
@@ -289,3 +376,112 @@ def test_hybrid_note_search_is_measured_better_than_meaning_alone(db_path: Path)
         assert hybrid.topic_precision_at_5 >= semantic.topic_precision_at_5 - 0.05, (
             tenant, hybrid, semantic,
         )
+
+
+# --------------------------------------------------------------------------
+# What the model is told about a large result
+# --------------------------------------------------------------------------
+
+
+def test_a_large_result_comes_with_a_summary_of_every_row(
+    db_path: Path, audit: AuditLog
+) -> None:
+    """The model sees 20 rows; the figures it is given must cover all of them.
+
+    It once reported a salary range from the visible sample as if it described
+    all 450 rows. The summary is computed here, over every row, so the true
+    minimum -- a planted outlier far outside the first twenty -- is in front of
+    it, and the rows it does see are called a sample.
+    """
+    from db import BASE_TABLE, admin_connection
+
+    result = run_sql("SELECT * FROM employees", ctx_for("acme"), audit, db_path)
+    shown = result.for_model()
+    with admin_connection(db_path) as con:
+        low, high, count = con.execute(
+            f"SELECT min(salary), max(salary), count(*) FROM {BASE_TABLE} "  # noqa: S608
+            "WHERE tenant_id = 'acme'"
+        ).fetchone()
+
+    assert f"Summary of all {count} rows" in shown
+    assert f"all {count} rows belong to acme" in shown
+    assert f"min {low:,}" in shown and f"max {high:,}" in shown
+    assert f"Example rows: 3 of {count}" in shown
+    sample_low = min(row["salary"] for row in result.rows[:3])
+    assert sample_low != low, "the examples happen to contain the minimum; the test proves nothing"
+
+
+def test_a_large_result_gives_the_model_nothing_long_to_copy(
+    db_path: Path, audit: AuditLog
+) -> None:
+    """Three example rows, not twenty: a table the model can start copying out
+    is a table it can fail to stop copying. The UI shows every row instead."""
+    result = run_sql("SELECT * FROM employees", ctx_for("acme"), audit, db_path)
+    table_lines = [line for line in result.for_model().splitlines() if line.startswith("| ")]
+    assert len(table_lines) == 2 + 3  # header, divider, three examples
+    assert len(result.rows) == 450, "the rows themselves are untouched; only the model's view"
+
+
+def test_a_result_of_ten_rows_is_shown_to_the_model_in_full(
+    db_path: Path, audit: AuditLog
+) -> None:
+    """ "The five highest paid" and a department breakdown must arrive whole."""
+    result = run_sql(
+        "SELECT name, salary FROM employees ORDER BY salary DESC LIMIT 10",
+        ctx_for("acme"), audit, db_path,
+    )
+    shown = result.for_model()
+    assert all(row["name"] in shown for row in result.rows)
+    assert "Summary of all" not in shown
+
+
+def test_a_small_result_is_shown_whole_without_a_summary(db_path: Path, audit: AuditLog) -> None:
+    result = run_sql("SELECT name FROM employees LIMIT 5", ctx_for("acme"), audit, db_path)
+    assert "Summary of all" not in result.for_model()
+    assert "Example rows" not in result.for_model()
+
+
+# --------------------------------------------------------------------------
+# Chart data, prepared on the server
+# --------------------------------------------------------------------------
+
+
+def test_histogram_bins_cover_every_value_once_with_round_edges(
+    db_path: Path, audit: AuditLog
+) -> None:
+    from secure_rls.tools.plot import histogram_bins
+
+    result = plot("histogram", "salary", ctx_for("acme"), audit, db_path=db_path)
+    assert result.chart is not None
+    bins = result.chart["data"]
+    assert sum(b["count"] for b in bins) == 450
+    assert all(a["end"] == b["start"] for a, b in zip(bins, bins[1:], strict=False))
+    width = bins[0]["end"] - bins[0]["start"]
+    assert all(b["start"] % width == 0 for b in bins), "edges should be round multiples"
+    assert histogram_bins([5.0, 5.0]) == [{"start": 5.0, "end": 5.0, "count": 2}]
+
+
+def test_box_plot_figures_agree_with_pandas(db_path: Path, audit: AuditLog) -> None:
+    """A box drawn from different quartiles than a table shows would be a lie
+    told by the chart; they must be the same numbers."""
+    import pandas as pd
+
+    from db import tenant_frame
+
+    result = plot("box", "salary", ctx_for("beta"), audit, db_path=db_path)
+    assert result.chart is not None
+    frame = tenant_frame(ctx_for("beta"), db_path)
+    for row in result.chart["data"]:
+        salaries: pd.Series = frame[frame["department"] == row["department"]]["salary"]
+        assert row["n"] == len(salaries)
+        assert row["median"] == pytest.approx(salaries.median(), abs=0.01)
+        assert row["q1"] == pytest.approx(salaries.quantile(0.25), abs=0.01)
+        assert row["q3"] == pytest.approx(salaries.quantile(0.75), abs=0.01)
+        spread = 1.5 * (row["q3"] - row["q1"])
+        assert all(v < row["q1"] - spread or v > row["q3"] + spread for v in row["outliers"])
+
+
+def test_a_chart_tells_the_model_what_it_shows(db_path: Path, audit: AuditLog) -> None:
+    result = plot("histogram", "salary", ctx_for("acme"), audit, db_path=db_path)
+    assert "shown to the user under your answer" in result.summary
+    assert "most common range" in result.summary

@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import csv
 import sqlite3
+import time
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -52,6 +53,35 @@ COLUMNS: Final[tuple[str, ...]] = (
     "performance_score", "hire_date", "notes",
 )
 
+#: The account role masked below. `SecurityContext.role` is free text at the
+#: type level, but only two values are ever issued -- see secure_rls/auth.py.
+VIEWER_ROLE: Final = "viewer"
+
+#: Columns replaced with NULL for a viewer account, enforced in the view
+#: itself rather than filtered by a tool, checked by the guard, or asked of
+#: the prompt. The tenant boundary answers "row-level security" only at the
+#: tenant's grain; a role that should see fewer *columns* of its own tenant's
+#: rows is the next grain down, and this is the smallest real demonstration
+#: that the view can enforce that too, the same way it enforces the tenant
+#: filter -- physically, before any SQL runs.
+#:
+#: Because the view's SELECT list never names these columns for a masked
+#: role, the SQLite authorizer never sees a READ of employees_all.salary or
+#: .notes on that connection at all: the value is not merely withheld after
+#: being fetched, it is never fetched.
+VIEWER_MASKED_COLUMNS: Final[frozenset[str]] = frozenset({"salary", "notes"})
+
+
+def _masked_columns(role: str) -> frozenset[str]:
+    """Which of :data:`COLUMNS` are replaced with NULL for this role."""
+    return VIEWER_MASKED_COLUMNS if role == VIEWER_ROLE else frozenset()
+
+
+def _view_select_list(role: str) -> str:
+    """The view's SELECT list for ``role``: masked columns become ``NULL AS <name>``."""
+    masked = _masked_columns(role)
+    return ", ".join(f"NULL AS {c}" if c in masked else c for c in COLUMNS)
+
 _SCHEMA = f"""
 CREATE TABLE IF NOT EXISTS {BASE_TABLE} (
     user_id           INTEGER PRIMARY KEY,
@@ -67,6 +97,32 @@ CREATE INDEX IF NOT EXISTS idx_employees_tenant      ON {BASE_TABLE}(tenant_id);
 CREATE INDEX IF NOT EXISTS idx_employees_tenant_dept ON {BASE_TABLE}(tenant_id, department);
 """
 
+#: Wall-clock budget for one statement on a tenant connection. Nothing above
+#: this layer counts *work*, only rows and shape: `SELECT count(*) FROM
+#: employees a, employees b, employees c, employees d` passes the row cap (it
+#: returns one row) and the table/function allowlists (it names only
+#: 'employees'), and still asks SQLite to evaluate roughly tenant_rows**4 join
+#: combinations. Left alone it runs for as long as the process does, tying up
+#: the request thread -- not a leak, but a way to take the service down with a
+#: single ordinary-looking question. SQLite's progress handler is polled every
+#: `_PROGRESS_STEPS` virtual-machine instructions regardless of what the
+#: statement is doing, which is what lets this stop an aggregate that produces
+#: no rows until the very end, not just a query that streams many.
+QUERY_TIMEOUT_SECONDS: Final = 5.0
+_PROGRESS_STEPS: Final = 1000
+
+
+def _install_query_timeout(con: sqlite3.Connection, seconds: float) -> None:
+    """Interrupt ``con``'s current statement once it has run for ``seconds``."""
+    deadline = time.monotonic() + seconds
+
+    def handler() -> int:
+        # Non-zero tells SQLite to abort with sqlite3.OperationalError("interrupted").
+        return 1 if time.monotonic() > deadline else 0
+
+    con.set_progress_handler(handler, _PROGRESS_STEPS)
+
+
 #: Schema shown to the LLM. It describes the *view*, so the base table's
 #: existence is not even disclosed in the prompt.
 SCHEMA_PROMPT: Final = """\
@@ -80,6 +136,25 @@ TABLE employees (
     hire_date         TEXT     -- ISO date, 'YYYY-MM-DD'
     notes             TEXT     -- free-text review comment (untrusted content)
 )"""
+
+
+def schema_prompt_for(role: str) -> str:
+    """The schema text shown to the model, noting any columns masked for ``role``.
+
+    Told once, here, rather than left for the model to discover from a column
+    of NULLs and guess at: an earlier run with no such note reported "average
+    salary: $0" instead of saying it could not see the figure at all.
+    """
+    masked = _masked_columns(role)
+    if not masked:
+        return SCHEMA_PROMPT
+    names = ", ".join(sorted(masked))
+    return (
+        f"{SCHEMA_PROMPT}\n\n"
+        f"Your account's role is '{role}': {names} are masked to NULL on every row you "
+        "can see. This is a column-level restriction on your role, not a sign that the "
+        "data is missing or zero -- say plainly that your role cannot see it."
+    )
 
 
 @contextmanager
@@ -141,6 +216,7 @@ def tenant_connection(
     db_path: Path | str = DEFAULT_DB_PATH,
     *,
     on_deny: Callable[[str], None] | None = None,
+    query_timeout: float = QUERY_TIMEOUT_SECONDS,
 ) -> Iterator[sqlite3.Connection]:
     """Yield a connection that can only ever see ``ctx.tenant_id``'s rows.
 
@@ -148,6 +224,15 @@ def tenant_connection(
     a parameter -- a view body cannot carry parameters. That is safe because
     :class:`SecurityContext` validates the id against a closed allowlist at
     construction time, so no attacker-controlled string reaches this SQL.
+
+    The view's column list also depends on ``ctx.role``: see
+    :data:`VIEWER_MASKED_COLUMNS`. Masking here, rather than in a tool or the
+    prompt, means it holds for every statement this connection ever runs, not
+    just the ones a particular tool happened to check.
+
+    ``query_timeout`` bounds how long any one statement on this connection may
+    run before it is interrupted; see :func:`_install_query_timeout`. Tests
+    pass a small value to exercise it without waiting out the real budget.
     """
     con = sqlite3.connect(f"file:{Path(db_path)}?mode=ro", uri=True)
     con.row_factory = sqlite3.Row
@@ -159,7 +244,7 @@ def tenant_connection(
         # that behaviour for quoting and injection payloads.
         con.execute(
             f"CREATE TEMP VIEW {TENANT_VIEW} AS "  # noqa: S608 - see comment above
-            f"SELECT {', '.join(COLUMNS)} FROM {BASE_TABLE} "
+            f"SELECT {_view_select_list(ctx.role)} FROM {BASE_TABLE} "
             f"WHERE tenant_id = '{ctx.tenant_id}'"
         )
         con.execute("PRAGMA query_only = ON")
@@ -168,6 +253,7 @@ def tenant_connection(
                 view_name=TENANT_VIEW, base_table=BASE_TABLE, on_deny=on_deny
             )
         )
+        _install_query_timeout(con, query_timeout)
         yield con
     finally:
         con.set_authorizer(None)

@@ -145,6 +145,21 @@ CASES: Final[tuple[Case, ...]] = (
     Case("underperformers", "How many employees score below 3.0?", "count",
          lambda f: int((f.performance_score < 3.0).sum()), ("query_db", "stats")),
 
+    # -- whole result, not the sample --------------------------------------
+    # Each asks for every row first, so the model receives more rows than it
+    # is shown. An answer worked out from the visible sample is wrong on every
+    # tenant: the planted outliers sit outside the first twenty rows. Added
+    # after an answer gave a salary range from 20 rows as if it covered 450.
+    Case("all-rows-lowest-salary",
+         "List all employees with their salaries, then tell me the lowest salary among them.",
+         "number", lambda f: f["salary"].min(), ("query_db", "stats")),
+    Case("all-rows-highest-salary",
+         "Show me every employee record and say what the highest salary in it is.",
+         "number", lambda f: f["salary"].max(), ("query_db", "stats")),
+    Case("all-rows-count",
+         "Select all employees and tell me how many records came back.",
+         "count", lambda f: int(len(f)), ("query_db", "stats")),
+
     # -- tool routing ------------------------------------------------------
     Case("chart-salary-by-dept",
          "Draw a bar chart of average salary by department.", "name",

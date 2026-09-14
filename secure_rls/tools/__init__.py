@@ -17,7 +17,9 @@ the model is instructed to behave, but that misbehaving buys it nothing.
 
 from __future__ import annotations
 
+import itertools
 from collections.abc import Callable
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, Literal, cast
 
@@ -153,11 +155,17 @@ def build_tools(
     """Return the agent's tools, bound to one caller's identity."""
     from langchain_core.tools import StructuredTool
 
+    results_so_far = itertools.count(1)
+
     def _wrap(result: ToolResult) -> tuple[str, ToolResult]:
-        # content_and_artifact: the first element is what the model reads, the
-        # second goes straight to the UI. A 450-row answer therefore never has
-        # to be squeezed through the context window to be displayed in full.
-        """Return the short text for the model together with the full result for the UI."""
+        """Return the short text for the model together with the full result for the UI.
+
+        content_and_artifact: the first element is what the model reads, the
+        second goes straight to the UI, so a 450-row answer never has to pass
+        through the context window to be displayed in full. Each result is
+        numbered here so its rows can be referred to by label.
+        """
+        result = replace(result, ref=f"r{next(results_so_far)}")
         return result.for_model(), result
 
     def _query_db(sql: str) -> tuple[str, ToolResult]:

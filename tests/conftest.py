@@ -24,3 +24,23 @@ def db_path(tmp_path_factory: pytest.TempPathFactory) -> Path:
 def tenant(request: pytest.FixtureRequest) -> str:
     """Runs the test once per tenant, so no tenant is accidentally special."""
     return str(request.param)
+
+
+@pytest.fixture(autouse=True)
+def no_real_model(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Fail any test that would send the final-answer step to a real model.
+
+    The suite must run with no model, as it does in CI. A test once passed no
+    stand-in composer and quietly called the local Ollama instead -- slower,
+    and a different result on a machine without it. pytest.fail raises a
+    BaseException, so the agent's fallback for a failed final step cannot
+    swallow it.
+    """
+    import agent
+
+    def refuse(model: str) -> object:
+        def compose(_messages: object) -> str:
+            pytest.fail("a test reached the real model; pass composer= to ask()")
+        return compose
+
+    monkeypatch.setattr(agent, "_model_composer", refuse)

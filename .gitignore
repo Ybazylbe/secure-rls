@@ -8,6 +8,6 @@ venv/
 .mypy_cache/
 .ruff_cache/
 .DS_Store
-.streamlit/secrets.toml
 evals/results/
 audit.log
+notes.txt

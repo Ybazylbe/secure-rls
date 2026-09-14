@@ -9,7 +9,7 @@ side-by-side comparison and the injection demo; everything else can be cut.
 brew services start ollama && ollama list          # models present
 python scripts/gen_data.py && python -c "import db; db.init_db(rebuild=True)"
 python -m pytest -q -m "not slow"                  # ~2 s, all green
-streamlit run app.py                               # leave it running
+npm --prefix web run build && uvicorn app:app --port 8000   # leave it running
 ```
 
 Ask one warm-up question in the app so the model is loaded — the first call

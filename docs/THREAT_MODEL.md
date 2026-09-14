@@ -72,12 +72,16 @@ Named because an unstated exclusion is indistinguishable from an oversight.
   the answer would be query-set-size limits or differential privacy.
 - **Host compromise.** Anyone with the database file has everything. This
   design protects tenants from each other, not from the operator.
-- **Denial of service.** Row caps and a step limit bound a single request; there
-  is no rate limiting, and a user can keep the model busy.
+- **Denial of service.** Row caps, a step limit and a per-statement time budget
+  (`db.QUERY_TIMEOUT_SECONDS`, which stops a query the row cap does not touch —
+  a self cross join returns one row and still asks SQLite to evaluate
+  tenant_rows**4 combinations) bound a single request; there is still no rate
+  limiting across requests, and a user can keep the model busy with many of
+  them.
 - **Model supply chain.** Weights cannot be audited for backdoors. Local
   inference removes the data-residency concern, not this one.
-- **Transport and session security.** Streamlit's session handling and TLS
-  termination are deployment concerns and are not addressed here.
+- **Transport and session security.** The app's session handling (a signed
+  cookie) and TLS termination are deployment concerns and are not addressed here.
 - **Multi-user audit integrity.** The audit log is a file the application can
   rewrite. A real deployment needs an append-only sink it cannot.
 
@@ -94,6 +98,10 @@ Named because an unstated exclusion is indistinguishable from an oversight.
 4. Tools are constructed per request by `build_tools`, closing over one
    context. A cached tool bound to the wrong context would defeat L1; the UI
    caches on the tenant as part of the key.
+5. The per-tenant view's column list depends on `ctx.role` (see
+   `db.VIEWER_MASKED_COLUMNS`), and the note index is cached per `(tenant,
+   role)` rather than per tenant for the same reason: a cache keyed on less
+   than everything the content depends on serves the wrong thing to someone.
 
 ## What would change at scale
 

@@ -101,10 +101,12 @@ def guard(sql: str, ctx: SecurityContext, *, max_rows: int = MAX_ROWS) -> Guarde
     """
     statement = _parse_single(sql)
     _reject_forbidden_nodes(statement, sql)
+    _reject_recursive_ctes(statement, sql)
     cte_names = _cte_names(statement)
     _check_tables(statement, cte_names, sql)
     _check_functions(statement, sql)
     _check_columns(statement, sql)
+    _reject_foreign_tenant_filters(statement, ctx, sql)
 
     rewrites: list[str] = []
     _strip_comments(statement)
@@ -163,6 +165,34 @@ def _reject_forbidden_nodes(statement: exp.Expression, sql: str) -> None:
         if isinstance(node, _FORBIDDEN_NODES):
             raise SqlGuardError(
                 f"statement kind {type(node).__name__.upper()} is not allowed", sql=sql
+            )
+
+
+def _reject_recursive_ctes(statement: exp.Expression, sql: str) -> None:
+    """Refuse ``WITH RECURSIVE`` outright.
+
+    Found by testing, not by reading the docs: a recursive CTE that never
+    touches ``employees`` at all (a plain number generator) is refused by the
+    SQLite authorizer (L3) with a generic "read of out-of-scope object" -- the
+    ephemeral relation the recursion builds has no name L3 recognises and no
+    `db_name` of ``temp``, so it falls through to the same deny path as an
+    actual out-of-scope table. Nothing leaks; the failure is just confusing,
+    and CLAUDE.md's own warning about L3 trusting a view name by nothing more
+    than its spelling is reason enough not to try to widen L3 to accommodate
+    it. This dataset is flat, so no legitimate question needs recursion; L4
+    forbids the shape before it ever reaches the connection.
+
+    Checked by walking node types rather than reading ``statement.args["with"]``:
+    sqlglot stores the clause under the key ``with_`` (the exact trap CLAUDE.md
+    already documents for ``from_`` in :func:`_local_tables`), so a
+    dictionary-key lookup here would silently see nothing to reject.
+    """
+    for clause in statement.find_all(exp.With):
+        if clause.args.get("recursive"):
+            raise SqlGuardError(
+                "WITH RECURSIVE is not allowed; this dataset has no hierarchy that needs "
+                "it -- write the query over 'employees' directly, or without recursion",
+                sql=sql,
             )
 
 
@@ -272,6 +302,59 @@ def _check_columns(statement: exp.Expression, sql: str) -> None:
         raise SqlGuardError(
             f"column {column.name!r} does not exist on 'employees'", sql=sql
         )
+
+
+def _reject_foreign_tenant_filters(
+    statement: exp.Expression, ctx: SecurityContext, sql: str
+) -> None:
+    """Refuse a query that selects rows for a tenant other than the caller's.
+
+    In plain terms: ``WHERE tenant_id IN ('beta', 'gamma')`` can never return
+    anything, because the view only holds the caller's rows and the rewrite
+    below adds the caller's tenant as well. Left to run, it came back empty, and
+    the model told the user that beta and gamma "have no employees" -- a false
+    statement built on an empty result. Refusing with a reason says what is
+    actually true: only the caller's tenant can be queried, so an empty result
+    would have said nothing about anyone else.
+
+    Nothing is being protected here that L2 and L3 do not already protect; this
+    exists so the model cannot misread the outcome. It works on the parsed
+    query, so comments, quoting and argument order make no difference.
+    """
+    own = ctx.tenant_id.lower()
+    asked_for: set[str] = set()
+    for comparison in statement.find_all(exp.EQ, exp.In):
+        if isinstance(comparison, exp.EQ):
+            sides = (comparison.this, comparison.expression)
+            if any(_is_tenant_column(side) for side in sides):
+                asked_for.update(_string_literals(sides))
+        elif _is_tenant_column(comparison.this):
+            asked_for.update(_string_literals(comparison.expressions))
+
+    foreign = sorted(value for value in asked_for if value != own)
+    if foreign:
+        names = ", ".join(foreign)
+        raise SqlGuardError(
+            f"this query asks for tenant_id {names}, but you can only query "
+            f"{ctx.tenant_id}'s rows here, so rows for any other tenant can never be "
+            f"returned: an empty result here says nothing about {names}. Remove "
+            f"the tenant filter; {ctx.tenant_id}'s is applied automatically.",
+            sql=sql,
+        )
+
+
+def _is_tenant_column(node: exp.Expression | None) -> bool:
+    """True if ``node`` is the tenant_id column, however it is qualified or cased."""
+    return isinstance(node, exp.Column) and node.name.lower() == "tenant_id"
+
+
+def _string_literals(nodes: object) -> set[str]:
+    """The lower-cased string literals among ``nodes``."""
+    return {
+        node.name.lower()
+        for node in (nodes if isinstance(nodes, (list, tuple)) else ())
+        if isinstance(node, exp.Literal) and node.is_string
+    }
 
 
 # ---------------------------------------------------------------------------

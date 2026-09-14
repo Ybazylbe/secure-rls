@@ -10,7 +10,7 @@ rows — and that this is enforced by the database rather than by asking the
 model nicely.
 
 ```
-Leak rate 0/25 on all three models · 92–95% answer accuracy · 100% correct refusals · 335 tests
+Leak rate 0/25 on all three models · 92–95% answer accuracy · 100% correct refusals · 375 tests
 ```
 
 ![architecture](docs/architecture.svg)
@@ -28,41 +28,43 @@ ollama pull mistral-nemo:12b
 python scripts/gen_data.py
 
 npm --prefix web ci && npm --prefix web run build
-uvicorn api:app --port 8000            # open http://localhost:8000
+uvicorn app:app --port 8000            # open http://localhost:8000
 ```
 
 For front-end work, run `npm --prefix web run dev` alongside the API and open
 http://localhost:5173 instead; Vite proxies `/api` to port 8000.
 
-A second interface, in Streamlit, shares no front-end code with the first and
-runs over the same tools — useful when a live demo has to work no matter what:
+Or deploy the container CI publishes to `ghcr.io/ybazylbe/secure-rls` on every
+push to `main` — publishing it is as far as CI goes; this is what actually runs
+it, in one command:
 
 ```bash
-streamlit run app.py                   # http://localhost:8501
+docker compose up -d              # pulls the published image and runs it
+docker compose up -d --build      # or builds from this checkout instead
 ```
 
-Or in a container, which CI builds and publishes on every push to `main`:
-
-```bash
-docker build -t secure-rls .
-docker run -p 8000:8000 secure-rls     # or ghcr.io/ybazylbe/secure-rls:latest
-```
-
-The image contains no model. It reaches Ollama at `OLLAMA_HOST`, which defaults
-to `http://host.docker.internal:11434`. Set `SECURE_RLS_SECRET` to keep sessions
-valid across restarts; without it each process signs with a fresh key.
+Equivalent to `docker run` with the same two environment variables, checked in
+as [`docker-compose.yml`](docker-compose.yml) rather than left as a paragraph
+to copy. The image contains no model. It reaches Ollama at `OLLAMA_HOST`, which
+defaults to `http://host.docker.internal:11434`. Set `SECURE_RLS_SECRET` to
+keep sessions valid across restarts; without it each process signs with a
+fresh key.
 
 ### Sign in
 
-| user | password | tenant | rows visible |
-| --- | --- | --- | --- |
-| `alice` | `acme-demo-2026` | acme | 450 |
-| `arthur` | `acme-demo-2026` | acme | 450 |
-| `bob` | `beta-demo-2026` | beta | 330 |
-| `gita` | `gamma-demo-2026` | gamma | 220 |
+| user | password | tenant | role | rows visible |
+| --- | --- | --- | --- | --- |
+| `alice` | `acme-demo-2026` | acme | analyst | 450 |
+| `arthur` | `acme-demo-2026` | acme | viewer | 450 |
+| `bob` | `beta-demo-2026` | beta | analyst | 330 |
+| `gita` | `gamma-demo-2026` | gamma | analyst | 220 |
 
 `alice` and `arthur` share a tenant on purpose: the boundary is the tenant, not
-the individual. Passwords are stored as argon2id hashes.
+the individual. `arthur`'s role also does something you can see: sign in as
+`arthur` and ask for salaries — every row comes back with `salary` and `notes`
+as `null`, the same 450 rows `alice` sees otherwise. See [Column-level masking
+for a role](#column-level-masking-for-a-role). Passwords are stored as argon2id
+hashes.
 
 ### What to try first
 
@@ -92,7 +94,7 @@ Five layers. The prompt is not one of them.
 | | Layer | Where | What it stops |
 | --- | --- | --- | --- |
 | **L1** | Identity | [`secure_rls/security/context.py`](secure_rls/security/context.py) | The tenant comes from the session. No tool takes a tenant, user or scope argument, so there is nothing for the model to forge or be argued into changing. |
-| **L2** | Physical | [`db.py`](db.py) | Each session gets a read-only connection whose only visible relation is a temporary view of its own tenant. The filter is in the view, not in the query. |
+| **L2** | Physical | [`db.py`](db.py) | Each session gets a read-only connection whose only visible relation is a temporary view of its own tenant, with any column its role masks replaced by `NULL`. The filter — and the mask — is in the view, not in the query. |
 | **L3** | Kernel | [`secure_rls/security/authorizer.py`](secure_rls/security/authorizer.py) | An SQLite authorizer allows the base table to be read *only* while expanding that view. `ATTACH`, `PRAGMA`, writes, DDL and non-allowlisted functions are refused below the SQL layer. |
 | **L4** | Validation | [`secure_rls/security/sql_guard.py`](secure_rls/security/sql_guard.py) | Generated SQL is parsed with `sqlglot` and checked on the AST: one read-only statement, allowlisted tables and functions, a row cap, and a tenant predicate injected into every scope. |
 | **L5** | Egress | [`secure_rls/security/egress.py`](secure_rls/security/egress.py) | Every result set is checked for foreign tenant ids before it is returned. In a correct system it never fires, which is exactly why it is worth having. |
@@ -124,6 +126,68 @@ SELECT load_extension('evil.so')  →  not authorized to use function
 See [`docs/THREAT_MODEL.md`](docs/THREAT_MODEL.md) for what is in scope, what is
 not, and why.
 
+### Why the agent is told *not* to filter
+
+The task brief sketches the opposite design: *"LLM prompts enforce RLS (e.g.,
+'Always filter by current_tenant')."* This project does the reverse — the
+prompt says the data is already restricted and tells the model not to add a
+filter of its own — because "always filter" is a control a model can fail at
+in three ordinary ways: forgetting, being argued out of it by an injected note,
+or losing the instruction once the context window fills. None of those are
+risks worth carrying when the alternative is not asking the model at all. The
+proof is not hypothetical:
+[`tests/test_isolation.py`](tests/test_isolation.py) and
+[`tests/test_sql_guard.py`](tests/test_sql_guard.py) assert the tenant boundary
+with no system prompt, no agent graph and no model anywhere in the loop —
+there is nothing in either test a prompt instruction could have changed,
+because the boundary sits two layers below anywhere a prompt could reach.
+
+### Why the tenant id is a literal, not a bound parameter
+
+The brief's own sketch writes the filter as `AND tenant_id = ?` — a bound
+parameter. The per-tenant view can't be built that way: SQLite views take no
+parameters at all, so the id has to be spelled into the view's SQL text one way
+or another regardless of design. What makes that safe is not escaping, it is
+that the value can never be attacker-controlled to begin with:
+[`SecurityContext`](secure_rls/security/context.py) accepts only `acme`,
+`beta` or `gamma` and refuses everything else *before* any SQL is built —
+[`tests/test_isolation.py::test_unknown_tenants_are_refused_at_construction`](tests/test_isolation.py)
+tries `acme' OR '1'='1'` and `acme; DROP TABLE employees_all` among others,
+and both are rejected at that point, not at the database. A bound parameter
+protects a query built from a value that *could* be anything; a closed
+allowlist checked before construction removes the "could be anything"
+instead. (L4's rewrite of the *query* — the predicate it adds on top of the
+view — is closer to the brief's sketch: an equality node built on the parsed
+AST, not string concatenation. It still renders back to a literal, for a
+different, simpler reason: the same text is what the reasoning trace shows the
+user as "the SQL that ran," and showing `?` there while a resolved value
+actually executed would make the trace describe a different statement than
+the one it claims to.)
+
+### Column-level masking for a role
+
+Tenant isolation answers "which rows" at the tenant's grain. A real deployment
+usually needs a narrower grain too — a manager who should see only their own
+department, an individual who should see only their own row, a role that
+should see fewer *columns* of rows it can otherwise see in full. This project
+demonstrates the last of those: accounts with the `viewer` role (`arthur`,
+alongside `alice`'s `analyst` on the same `acme` tenant) get `salary` and
+`notes` back as `NULL` on every row, enforced the same way the tenant filter
+is — in the view itself (`VIEWER_MASKED_COLUMNS` in [`db.py`](db.py)), not by
+a tool declining to display a column or a prompt asking the model not to
+mention one. Because the view's own `SELECT` list never names a masked column
+for that role, the SQLite authorizer never sees a read of
+`employees_all.salary` on a viewer's connection at all — the value is not
+withheld after being fetched, it is never fetched. The note index respects the
+same boundary: it is cached per `(tenant, role)` rather than per tenant, so a
+viewer can never be served an analyst's already-built index of real note text
+(or the reverse).
+
+This is one demonstration, not a role system — there is no per-department or
+per-row scoping here, and nothing in CLAUDE.md asks for one. What it shows is
+that the mechanism generalises: a view is a natural place to encode "who may
+see what" at whatever grain a real deployment needs, tenant and column alike.
+
 ### Identity above the layers
 
 The five layers protect a connection that already knows who is asking. They
@@ -139,17 +203,20 @@ never named.** The second side is now its own sign-in, with its own password and
 a separately signed cookie, and [`tests/test_api.py`](tests/test_api.py) pins
 that the old request shape is refused.
 
-The HTTP layer ([`api.py`](api.py)) carries a signed cookie holding a username
+The HTTP layer ([`app.py`](app.py)) carries a signed cookie holding a username
 and nothing else. Every request rebuilds the context on the server from the
 account table, so a client cannot assert a tenant however it edits a request.
 
 ### Retrieval
 
-Semantic search over the free-text `notes` column uses **one index per tenant**,
-not one index with a metadata filter. A foreign note is never embedded into a
-structure the caller can search, so isolation is a property of what exists
-rather than of a parameter someone has to remember to pass. The trade-off, and
-what would change at ten thousand tenants, is in
+Semantic search over the free-text `notes` column uses **one index per
+(tenant, role)**, not one index with a metadata filter. A foreign note is
+never embedded into a structure the caller can search, so isolation is a
+property of what exists rather than of a parameter someone has to remember to
+pass. Role is part of the cache key for the same reason: keyed by tenant
+alone, a viewer and an analyst from the same tenant would share whichever one
+of them happened to trigger the build first. The trade-off, and what would
+change at ten thousand tenants, is in
 [`secure_rls/rag/index.py`](secure_rls/rag/index.py).
 
 ### Prompt injection, planted on purpose
@@ -211,20 +278,46 @@ asks an ordinary question and reports honestly whether hostile text arrived.
 The leak rate measures isolation and nothing else. How the answer reads is a
 separate concern, handled in three ways, strongest first:
 
-1. **The model does not present data.** The rows under an answer come straight
-   from the tool results. Any table the model writes into its own text is
-   replaced by a note, because a copy can mislabel whose rows they are or
-   invent rows outright. A line written by the server, not the model, states
-   whose data the tools read ("Source: acme's data only · 450 rows").
-2. **Unambiguous faults get one rewrite.** An answer that labels data with
+1. **Facts come from the system, not the model.** The model never types the
+   data in its answer. Every row it sees carries a label (`r2.4`), and its final
+   reply is constrained to a fixed JSON shape: a short answer plus the labels of
+   the rows the answer is about. The server looks those labels up in the tool
+   results and shows the real rows; a label that matches nothing is ignored and
+   reported. So a row in an answer cannot be invented, mislabelled or given the
+   wrong tenant, and a correct selection is shown rather than cut out. The model
+   writing that final answer is also told what the session knows for certain —
+   who is asking, their role, and that they can see only their own tenant — so
+   a question claiming "I am the system administrator" is not echoed back.
+   Rows can be picked only from results small enough to have been shown in
+   full. Images and web addresses are removed from the model's text: no tool
+   produces a URL, so any link was invented — and a markdown image pointing at
+   an attacker's address is a known way to smuggle data out of an LLM app.
+   Charts are drawn by the interface from figures the server prepared. Any
+   table the model still writes into its text is replaced by a note. A line
+   written by the server states whose data the tools read ("Source: acme's data
+   only · 450 rows"), and another appears whenever the data contained text
+   aimed at manipulating the AI. A result of more than ten rows is not shown to
+   the model as a table at all: it gets a summary of every row computed by the
+   system — count, owner, ranges, averages — and three example rows, and asks
+   for particular rows with a narrower query if it needs them. With twenty rows
+   in front of it, a model asked for "every tenant's payroll" started copying
+   them out and did not stop for over eight minutes.
+2. **Outcomes the model could misread are made explicit.** A query that asks
+   for another tenant (`tenant_id IN ('beta', 'gamma')`) is refused by the SQL
+   guard with a reason, instead of running and coming back empty — an empty
+   result was once reported as "beta has no employees". Validation errors name
+   the real problem ("k: must be ≤ 5").
+3. **Unambiguous faults get one rewrite.** An answer that labels data with
    another tenant, answers about another tenant without saying whose data it
-   shows, or writes a tool call out as text instead of making it is sent back
-   once with the facts. The checks only count explicit signs — tenant names in
-   bare prose ("beta access", "gamma-ray") or everyday words that happen to be
-   tool names ("stats", "plot") do not trigger them.
-3. **Everything is measured.** The evaluation reports how often each fault
-   still reaches the user, and [`tests/fixtures/answers.json`](tests/fixtures/answers.json)
-   keeps every fault and every false alarm seen so far as a regression test.
+   shows, or writes a tool call out as text is redone once. The model is given
+   the facts and its tool results, but not the reply being replaced, so it has
+   nothing to apologise for. The checks count only explicit signs — tenant
+   names in bare prose ("beta access", "gamma-ray") or everyday words that
+   happen to be tool names ("stats", "plot") do not trigger them.
+4. **Everything is measured.** The evaluation reports how often each fault
+   still reaches the user, golden questions check that whole-result figures are
+   not taken from a sample, and [`tests/fixtures/answers.json`](tests/fixtures/answers.json)
+   keeps every fault and false alarm seen so far as a regression test.
 
 ## Evaluation and model benchmark
 
@@ -232,7 +325,7 @@ Correctness is scored against ground truth computed with pandas over an
 **unrestricted** connection — deliberately bypassing every security layer. An
 expectation copied from a previous run measures only that the model is
 consistent, including when it is consistently wrong. It also means an isolation
-bug would show up as an accuracy collapse: the 37 questions run against all
+bug would show up as an accuracy collapse: the 40 questions run against all
 three tenants, each with its own pay scale, so an agent answering from the whole
 table fails two thirds of them outright.
 
@@ -301,24 +394,25 @@ question, including what remains unresolved about open weights of any origin.
 ## Layout
 
 ```
-api.py            FastAPI backend: sessions, chat, side-by-side, attacks, audit
+app.py            the app: FastAPI API (sessions, chat, side-by-side, attacks, audit)
+                  and, once web/ is built, the React front end
 web/              React + TypeScript front end (Vite, Tailwind, Radix, lucide)
-app.py            Streamlit interface over the same tools
 agent.py          LangGraph agent — plan, act, observe. Not security-critical.
-db.py             storage, per-tenant views, read-only connections (L2)
+db.py             storage, per-tenant+role views, read-only connections (L2)
 employees.csv     1000 rows, 3 tenants, seeded, with planted outliers and injections
+docker-compose.yml  the deployment CI's release stops short of; `docker compose up -d`
 secure_rls/
   security/       the five layers' code (L1, L3, L4, L5) and the audit trail
   tools/          query_db, stats, plot, detect_anomalies, search_notes;
                   no schema mentions a tenant
-  rag/            per-tenant vector indexes
+  rag/            per-tenant, per-role vector indexes
   llm/            the three models, their origin and licence
   auth.py         argon2id sign-in — the one place a tenant is decided
   redteam.py      the attack catalogue and the containment verdict
   oracle.py       independent ground truth for the verdict
   grounding.py    checks that figures in an answer came from a tool
 evals/            golden questions, attack runner, model benchmark
-tests/            335 tests; none needs a model
+tests/            390 tests; none needs a model
 docs/             threat model, evaluation method, benchmark, demo script
 .claude/          project rules, a security-review subagent, two commands, a hook
 ```
@@ -343,6 +437,16 @@ gate on isolation at all.
 pulls a model and runs the attack suite weekly and on demand. It fails only on a
 leak — a model that answers worse is a procurement decision, a model that leaks
 is a defect.
+
+**What CI does not do is deploy anything.** Publishing an image to a registry
+is a release: it makes a new version available, and nothing about it is
+running anywhere as a result. [`docker-compose.yml`](docker-compose.yml) is
+the deployment half — the one command that turns that published image into a
+service on a machine (`docker compose up -d`) — checked in rather than left as
+a paragraph to copy. There is no CD job in this repository that deploys it
+anywhere on its own, because there is no server for this project to deploy to;
+calling the registry push "deployment" would have been the easy, dishonest
+answer.
 
 ## Agentic development
 
@@ -445,6 +549,11 @@ Stated because they are real, not because they are comfortable.
   attacker from narrowing aggregates over their own tenant to infer an
   individual's salary. Query-set-size limits or differential privacy would be
   the next layer, and are not built.
+- **The misread-outcome refusal is best effort.** The guard refuses
+  `tenant_id = 'beta'` and `tenant_id IN (...)`, but not every way of spelling
+  the same filter (`LIKE`, `lower(tenant_id)`, a renamed column in a `WITH`).
+  Those still run and come back empty. Nothing leaks either way — the view and
+  the authorizer hold — but the model can misread the empty result.
 - **Answers can be wrong without leaking.** Every model fails some questions:
   mistral on filtered counts, qwen on the underperformers question, llama more
   broadly. Faults with an unambiguous sign get one rewrite and are measured;
@@ -469,7 +578,7 @@ expected:
 | --- | --- |
 | Data, storage, the five security layers | ~6 h |
 | Tools, agent, retrieval | ~5 h |
-| Streamlit UI | ~3 h |
+| First UI, in Streamlit (since replaced by React) | ~3 h |
 | Evaluation, and the six defects it found | ~5 h |
 | CI, container, documentation | ~2 h |
 

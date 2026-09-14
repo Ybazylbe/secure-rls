@@ -2,6 +2,7 @@ import { Loader2, LogIn, LogOut, Users } from "lucide-react";
 import { useEffect, useState } from "react";
 
 import { api, type Account, type Answer, type Identity } from "@/api";
+import { Charts } from "@/components/Chart";
 import { Data } from "@/components/Data";
 import { Grounding } from "@/components/Grounding";
 import { Trace } from "@/components/Trace";
@@ -98,6 +99,7 @@ export function Compare({ tenant, model }: { tenant: string; model: string }) {
                 <Badge tone="info">{side.tenant}</Badge>
                 <p className="whitespace-pre-wrap text-sm leading-relaxed">{side.text}</p>
                 <Grounding answer={side} />
+                <Charts answer={side} />
                 <Data answer={side} />
                 <Trace steps={side.steps} />
               </CardContent>

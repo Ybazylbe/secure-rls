@@ -1,6 +1,6 @@
 ---
 name: security-reviewer
-description: Reviews changes to the row-level-security layers. Use whenever a diff touches secure_rls/security/, db.py, api.py, secure_rls/auth.py, any tool schema, or the leak-rate verdict (secure_rls/oracle.py, secure_rls/redteam.py), and before merging anything that could affect tenant isolation.
+description: Reviews changes to the row-level-security layers. Use whenever a diff touches secure_rls/security/, db.py, app.py, secure_rls/auth.py, any tool schema, or the leak-rate verdict (secure_rls/oracle.py, secure_rls/redteam.py), and before merging anything that could affect tenant isolation.
 tools: Read, Grep, Glob, Bash
 ---
 
@@ -43,8 +43,8 @@ and move on if that is all you find.
    built. Any code that constructs a `SecurityContext` from something other
    than the signed session -- a tenant list, a request field, a "peer" for a
    comparison -- and returns what that context produced is a leak, however well
-   the layers below hold. Trace every `SecurityContext(` in `api.py` and
-   `app.py` to its source.
+   the layers below hold. Trace every `SecurityContext(` in `app.py` to its
+   source.
 
 6. **The measurement is independent.** `verdict()` and `secure_rls/oracle.py`
    decide the leak rate. They must attribute rows by ground truth (admin

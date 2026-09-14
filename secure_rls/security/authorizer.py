@@ -37,10 +37,17 @@ _ALLOWED_ACTIONS: Final[frozenset[int]] = frozenset(
 #: refused, which rules out extension loading and file I/O by construction.
 #: The SQL guard (L4) imports this same set, so the two layers cannot drift
 #: apart and disagree about what is callable.
+#:
+#: ``group_concat`` is deliberately absent. The row cap (L4's LIMIT 500) counts
+#: *output rows*, and a bare aggregate is always one row -- so
+#: ``SELECT group_concat(name || ':' || salary) FROM employees`` returned an
+#: entire tenant's names and salaries concatenated into a single cell,
+#: unlimited by anything upstream. Nothing crossed a tenant boundary, but it
+#: defeated the bulk-extraction guard the cap exists for. No tool here needs it.
 ALLOWED_FUNCTIONS: Final[frozenset[str]] = frozenset(
     {
         # aggregates
-        "avg", "count", "group_concat", "max", "min", "sum", "total",
+        "avg", "count", "max", "min", "sum", "total",
         # numeric
         "abs", "round", "ceil", "ceiling", "floor", "cast", "sqrt", "pow", "power",
         # string

@@ -1,7 +1,8 @@
 import { ArrowUp, Bot, Loader2, User } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 
-import { api, type Answer } from "@/api";
+import { api, type Answer, type HistoryTurn } from "@/api";
+import { Charts } from "@/components/Chart";
 import { Data } from "@/components/Data";
 import { Grounding } from "@/components/Grounding";
 import { Trace } from "@/components/Trace";
@@ -10,6 +11,11 @@ import { cn } from "@/lib/utils";
 
 /** One question and the agent's answer to it. */
 export type Turn = { question: string; answer: Answer };
+
+/** How many prior turns are sent as context. Mirrors agent.MAX_HISTORY_TURNS
+ * on the backend, which ignores anything past its own window anyway; kept in
+ * step here only so the request does not carry turns nobody will read. */
+const HISTORY_WINDOW = 4;
 
 /** Example questions shown as buttons above the input box: [button label, question]. */
 const SUGGESTIONS: [string, string][] = [
@@ -48,7 +54,10 @@ export function Chat({
     setPending(question);
     setError(null);
     try {
-      onTurn({ question, answer: await api.ask(question, model) });
+      const history: HistoryTurn[] = turns
+        .slice(-HISTORY_WINDOW)
+        .map((turn) => ({ question: turn.question, answer: turn.answer.text }));
+      onTurn({ question, answer: await api.ask(question, model, history) });
     } catch (err) {
       setError(err instanceof Error ? err.message : "The request failed");
     } finally {
@@ -58,9 +67,9 @@ export function Chat({
 
   return (
     <div className="flex h-full flex-col">
-      <div className="flex-1 space-y-6 overflow-y-auto px-1 pb-6">
+      <div className="flex-1 space-y-6 overflow-y-auto px-1 pt-6 pb-6">
         {turns.length === 0 && !pending && (
-          <div className="pt-6">
+          <div className="pt-1">
             <h2 className="text-xl font-semibold text-teal-deep">Ask about {tenant}'s employees</h2>
             <p className="pt-1 text-sm text-ink/55">
               Every answer is computed from the rows you are allowed to see. Open a step to check
@@ -76,6 +85,7 @@ export function Chat({
               <p className="whitespace-pre-wrap">{turn.answer.text}</p>
               <div className="space-y-3 pt-3">
                 <Grounding answer={turn.answer} />
+                <Charts answer={turn.answer} />
                 <Data answer={turn.answer} />
                 <Trace steps={turn.answer.steps} />
               </div>

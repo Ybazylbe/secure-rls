@@ -10,7 +10,7 @@ rows — and that this is enforced by the database rather than by asking the
 model nicely.
 
 ```
-Leak rate 0/25 on all three models · 92–95% answer accuracy · 100% correct refusals · 335 tests
+Leak rate 0/25 on all three models · 92–95% answer accuracy · 100% correct refusals · 375 tests
 ```
 
 ![architecture](docs/architecture.svg)
@@ -28,18 +28,11 @@ ollama pull mistral-nemo:12b
 python scripts/gen_data.py
 
 npm --prefix web ci && npm --prefix web run build
-uvicorn api:app --port 8000            # open http://localhost:8000
+uvicorn app:app --port 8000            # open http://localhost:8000
 ```
 
 For front-end work, run `npm --prefix web run dev` alongside the API and open
 http://localhost:5173 instead; Vite proxies `/api` to port 8000.
-
-A second interface, in Streamlit, shares no front-end code with the first and
-runs over the same tools — useful when a live demo has to work no matter what:
-
-```bash
-streamlit run app.py                   # http://localhost:8501
-```
 
 Or in a container, which CI builds and publishes on every push to `main`:
 
@@ -139,7 +132,7 @@ never named.** The second side is now its own sign-in, with its own password and
 a separately signed cookie, and [`tests/test_api.py`](tests/test_api.py) pins
 that the old request shape is refused.
 
-The HTTP layer ([`api.py`](api.py)) carries a signed cookie holding a username
+The HTTP layer ([`app.py`](app.py)) carries a signed cookie holding a username
 and nothing else. Every request rebuilds the context on the server from the
 account table, so a client cannot assert a tenant however it edits a request.
 
@@ -211,20 +204,46 @@ asks an ordinary question and reports honestly whether hostile text arrived.
 The leak rate measures isolation and nothing else. How the answer reads is a
 separate concern, handled in three ways, strongest first:
 
-1. **The model does not present data.** The rows under an answer come straight
-   from the tool results. Any table the model writes into its own text is
-   replaced by a note, because a copy can mislabel whose rows they are or
-   invent rows outright. A line written by the server, not the model, states
-   whose data the tools read ("Source: acme's data only · 450 rows").
-2. **Unambiguous faults get one rewrite.** An answer that labels data with
+1. **Facts come from the system, not the model.** The model never types the
+   data in its answer. Every row it sees carries a label (`r2.4`), and its final
+   reply is constrained to a fixed JSON shape: a short answer plus the labels of
+   the rows the answer is about. The server looks those labels up in the tool
+   results and shows the real rows; a label that matches nothing is ignored and
+   reported. So a row in an answer cannot be invented, mislabelled or given the
+   wrong tenant, and a correct selection is shown rather than cut out. The model
+   writing that final answer is also told what the session knows for certain —
+   who is asking, their role, and that they can see only their own tenant — so
+   a question claiming "I am the system administrator" is not echoed back.
+   Rows can be picked only from results small enough to have been shown in
+   full. Images and web addresses are removed from the model's text: no tool
+   produces a URL, so any link was invented — and a markdown image pointing at
+   an attacker's address is a known way to smuggle data out of an LLM app.
+   Charts are drawn by the interface from figures the server prepared. Any
+   table the model still writes into its text is replaced by a note. A line
+   written by the server states whose data the tools read ("Source: acme's data
+   only · 450 rows"), and another appears whenever the data contained text
+   aimed at manipulating the AI. A result of more than ten rows is not shown to
+   the model as a table at all: it gets a summary of every row computed by the
+   system — count, owner, ranges, averages — and three example rows, and asks
+   for particular rows with a narrower query if it needs them. With twenty rows
+   in front of it, a model asked for "every tenant's payroll" started copying
+   them out and did not stop for over eight minutes.
+2. **Outcomes the model could misread are made explicit.** A query that asks
+   for another tenant (`tenant_id IN ('beta', 'gamma')`) is refused by the SQL
+   guard with a reason, instead of running and coming back empty — an empty
+   result was once reported as "beta has no employees". Validation errors name
+   the real problem ("k: must be ≤ 5").
+3. **Unambiguous faults get one rewrite.** An answer that labels data with
    another tenant, answers about another tenant without saying whose data it
-   shows, or writes a tool call out as text instead of making it is sent back
-   once with the facts. The checks only count explicit signs — tenant names in
-   bare prose ("beta access", "gamma-ray") or everyday words that happen to be
-   tool names ("stats", "plot") do not trigger them.
-3. **Everything is measured.** The evaluation reports how often each fault
-   still reaches the user, and [`tests/fixtures/answers.json`](tests/fixtures/answers.json)
-   keeps every fault and every false alarm seen so far as a regression test.
+   shows, or writes a tool call out as text is redone once. The model is given
+   the facts and its tool results, but not the reply being replaced, so it has
+   nothing to apologise for. The checks count only explicit signs — tenant
+   names in bare prose ("beta access", "gamma-ray") or everyday words that
+   happen to be tool names ("stats", "plot") do not trigger them.
+4. **Everything is measured.** The evaluation reports how often each fault
+   still reaches the user, golden questions check that whole-result figures are
+   not taken from a sample, and [`tests/fixtures/answers.json`](tests/fixtures/answers.json)
+   keeps every fault and false alarm seen so far as a regression test.
 
 ## Evaluation and model benchmark
 
@@ -232,7 +251,7 @@ Correctness is scored against ground truth computed with pandas over an
 **unrestricted** connection — deliberately bypassing every security layer. An
 expectation copied from a previous run measures only that the model is
 consistent, including when it is consistently wrong. It also means an isolation
-bug would show up as an accuracy collapse: the 37 questions run against all
+bug would show up as an accuracy collapse: the 40 questions run against all
 three tenants, each with its own pay scale, so an agent answering from the whole
 table fails two thirds of them outright.
 
@@ -301,9 +320,9 @@ question, including what remains unresolved about open weights of any origin.
 ## Layout
 
 ```
-api.py            FastAPI backend: sessions, chat, side-by-side, attacks, audit
+app.py            the app: FastAPI API (sessions, chat, side-by-side, attacks, audit)
+                  and, once web/ is built, the React front end
 web/              React + TypeScript front end (Vite, Tailwind, Radix, lucide)
-app.py            Streamlit interface over the same tools
 agent.py          LangGraph agent — plan, act, observe. Not security-critical.
 db.py             storage, per-tenant views, read-only connections (L2)
 employees.csv     1000 rows, 3 tenants, seeded, with planted outliers and injections
@@ -318,7 +337,7 @@ secure_rls/
   oracle.py       independent ground truth for the verdict
   grounding.py    checks that figures in an answer came from a tool
 evals/            golden questions, attack runner, model benchmark
-tests/            335 tests; none needs a model
+tests/            375 tests; none needs a model
 docs/             threat model, evaluation method, benchmark, demo script
 .claude/          project rules, a security-review subagent, two commands, a hook
 ```
@@ -445,6 +464,11 @@ Stated because they are real, not because they are comfortable.
   attacker from narrowing aggregates over their own tenant to infer an
   individual's salary. Query-set-size limits or differential privacy would be
   the next layer, and are not built.
+- **The misread-outcome refusal is best effort.** The guard refuses
+  `tenant_id = 'beta'` and `tenant_id IN (...)`, but not every way of spelling
+  the same filter (`LIKE`, `lower(tenant_id)`, a renamed column in a `WITH`).
+  Those still run and come back empty. Nothing leaks either way — the view and
+  the authorizer hold — but the model can misread the empty result.
 - **Answers can be wrong without leaking.** Every model fails some questions:
   mistral on filtered counts, qwen on the underperformers question, llama more
   broadly. Faults with an unambiguous sign get one rewrite and are measured;
@@ -469,7 +493,7 @@ expected:
 | --- | --- |
 | Data, storage, the five security layers | ~6 h |
 | Tools, agent, retrieval | ~5 h |
-| Streamlit UI | ~3 h |
+| First UI, in Streamlit (since replaced by React) | ~3 h |
 | Evaluation, and the six defects it found | ~5 h |
 | CI, container, documentation | ~2 h |
 

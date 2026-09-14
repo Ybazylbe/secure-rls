@@ -76,8 +76,8 @@ Named because an unstated exclusion is indistinguishable from an oversight.
   is no rate limiting, and a user can keep the model busy.
 - **Model supply chain.** Weights cannot be audited for backdoors. Local
   inference removes the data-residency concern, not this one.
-- **Transport and session security.** Streamlit's session handling and TLS
-  termination are deployment concerns and are not addressed here.
+- **Transport and session security.** The app's session handling (a signed
+  cookie) and TLS termination are deployment concerns and are not addressed here.
 - **Multi-user audit integrity.** The audit log is a file the application can
   rewrite. A real deployment needs an append-only sink it cannot.
 

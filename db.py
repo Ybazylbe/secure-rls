@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import csv
 import sqlite3
+import time
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -66,6 +67,32 @@ CREATE TABLE IF NOT EXISTS {BASE_TABLE} (
 CREATE INDEX IF NOT EXISTS idx_employees_tenant      ON {BASE_TABLE}(tenant_id);
 CREATE INDEX IF NOT EXISTS idx_employees_tenant_dept ON {BASE_TABLE}(tenant_id, department);
 """
+
+#: Wall-clock budget for one statement on a tenant connection. Nothing above
+#: this layer counts *work*, only rows and shape: `SELECT count(*) FROM
+#: employees a, employees b, employees c, employees d` passes the row cap (it
+#: returns one row) and the table/function allowlists (it names only
+#: 'employees'), and still asks SQLite to evaluate roughly tenant_rows**4 join
+#: combinations. Left alone it runs for as long as the process does, tying up
+#: the request thread -- not a leak, but a way to take the service down with a
+#: single ordinary-looking question. SQLite's progress handler is polled every
+#: `_PROGRESS_STEPS` virtual-machine instructions regardless of what the
+#: statement is doing, which is what lets this stop an aggregate that produces
+#: no rows until the very end, not just a query that streams many.
+QUERY_TIMEOUT_SECONDS: Final = 5.0
+_PROGRESS_STEPS: Final = 1000
+
+
+def _install_query_timeout(con: sqlite3.Connection, seconds: float) -> None:
+    """Interrupt ``con``'s current statement once it has run for ``seconds``."""
+    deadline = time.monotonic() + seconds
+
+    def handler() -> int:
+        # Non-zero tells SQLite to abort with sqlite3.OperationalError("interrupted").
+        return 1 if time.monotonic() > deadline else 0
+
+    con.set_progress_handler(handler, _PROGRESS_STEPS)
+
 
 #: Schema shown to the LLM. It describes the *view*, so the base table's
 #: existence is not even disclosed in the prompt.
@@ -141,6 +168,7 @@ def tenant_connection(
     db_path: Path | str = DEFAULT_DB_PATH,
     *,
     on_deny: Callable[[str], None] | None = None,
+    query_timeout: float = QUERY_TIMEOUT_SECONDS,
 ) -> Iterator[sqlite3.Connection]:
     """Yield a connection that can only ever see ``ctx.tenant_id``'s rows.
 
@@ -148,6 +176,10 @@ def tenant_connection(
     a parameter -- a view body cannot carry parameters. That is safe because
     :class:`SecurityContext` validates the id against a closed allowlist at
     construction time, so no attacker-controlled string reaches this SQL.
+
+    ``query_timeout`` bounds how long any one statement on this connection may
+    run before it is interrupted; see :func:`_install_query_timeout`. Tests
+    pass a small value to exercise it without waiting out the real budget.
     """
     con = sqlite3.connect(f"file:{Path(db_path)}?mode=ro", uri=True)
     con.row_factory = sqlite3.Row
@@ -168,6 +200,7 @@ def tenant_connection(
                 view_name=TENANT_VIEW, base_table=BASE_TABLE, on_deny=on_deny
             )
         )
+        _install_query_timeout(con, query_timeout)
         yield con
     finally:
         con.set_authorizer(None)

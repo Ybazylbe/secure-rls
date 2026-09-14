@@ -18,7 +18,7 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-from db import DEFAULT_DB_PATH, tenant_connection
+from db import DEFAULT_DB_PATH, QUERY_TIMEOUT_SECONDS, tenant_connection
 from secure_rls.security.audit import AuditLog
 from secure_rls.security.context import SecurityContext
 from secure_rls.security.egress import EgressViolation, scan_for_injection, verify_rows
@@ -31,8 +31,15 @@ def run_sql(
     ctx: SecurityContext,
     audit: AuditLog,
     db_path: Path | str = DEFAULT_DB_PATH,
+    *,
+    query_timeout: float = QUERY_TIMEOUT_SECONDS,
 ) -> ToolResult:
-    """Validate, execute and vet one read-only query on behalf of ``ctx``."""
+    """Validate, execute and vet one read-only query on behalf of ``ctx``.
+
+    ``query_timeout`` is forwarded to :func:`db.tenant_connection`, which
+    interrupts the statement if it runs past that budget -- see the constant's
+    docstring in :mod:`db` for why row and shape checks alone are not enough.
+    """
     try:
         guarded = guard(sql, ctx)
     except SqlGuardError as err:
@@ -43,14 +50,27 @@ def run_sql(
 
     denials: list[str] = []
     try:
-        with tenant_connection(ctx, db_path, on_deny=denials.append) as con:
+        with tenant_connection(
+            ctx, db_path, on_deny=denials.append, query_timeout=query_timeout
+        ) as con:
             cursor = con.execute(guarded.sql)
             rows = tuple(dict(r) for r in cursor.fetchall())
     # Before Python 3.12, sqlite3 reports a multi-statement payload as
     # sqlite3.Warning, which is not a subclass of sqlite3.Error. Catching only
     # Error would turn that refusal into an unhandled crash on 3.10 and 3.11.
     except (sqlite3.Error, sqlite3.Warning) as err:
-        detail = denials[0] if denials else str(err)
+        if denials:
+            detail = denials[0]
+        elif "interrupted" in str(err).lower():
+            # Raised by the progress handler installed in tenant_connection,
+            # not by the authorizer, so it never reaches `denials`.
+            detail = (
+                f"this query ran longer than the {query_timeout:g}s time budget and was "
+                "stopped; narrow it with a filter, a smaller LIMIT, or fewer joined copies "
+                "of the table"
+            )
+        else:
+            detail = str(err)
         audit.record(
             ctx, "query_db", "refused", detail=detail, sql=guarded.sql, layer="L3"
         )

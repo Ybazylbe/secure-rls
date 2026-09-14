@@ -93,6 +93,25 @@ def test_a_multi_statement_reaching_the_database_is_refused_not_raised(
     assert not result.rows
 
 
+def test_an_unbounded_query_is_stopped_by_the_time_budget(
+    db_path: Path, audit: AuditLog
+) -> None:
+    """Row and shape checks alone do not stop a self cross join.
+
+    ``SELECT count(*) ...`` over four copies of the table names only
+    'employees', calls only allowlisted functions, and returns a single row --
+    every static check upstream passes it -- while asking SQLite to evaluate
+    roughly tenant_rows**4 combinations. A tiny query_timeout stands in for the
+    real budget so the test does not have to wait it out.
+    """
+    result = run_sql(
+        "SELECT count(*) FROM employees a, employees b, employees c, employees d",
+        ctx_for("acme"), audit, db_path, query_timeout=0.05,
+    )
+    assert result.refused
+    assert "time budget" in (result.reason or "")
+
+
 def test_aggregates_differ_between_tenants(db_path: Path, audit: AuditLog) -> None:
     """Same question, three tenants, three answers -- the dataset gives each a
     different pay scale, so identical numbers would mean the filter is gone."""

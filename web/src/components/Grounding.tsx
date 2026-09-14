@@ -1,4 +1,4 @@
-import { Database, TriangleAlert } from "lucide-react";
+import { Database, ShieldAlert, TriangleAlert } from "lucide-react";
 
 import type { Answer } from "@/api";
 
@@ -16,7 +16,10 @@ export function Grounding({ answer }: { answer: Answer }) {
   const scope = answer.scope;
   const shown = answer.ungrounded.slice(0, 8);
   const more = answer.ungrounded.length - shown.length;
-  if (!scope?.calls && shown.length === 0 && claimed.length === 0) return null;
+  const injected = answer.flags ?? [];
+  if (!scope?.calls && shown.length === 0 && claimed.length === 0 && injected.length === 0) {
+    return null;
+  }
 
   return (
     <div className="space-y-1.5">
@@ -25,9 +28,30 @@ export function Grounding({ answer }: { answer: Answer }) {
         // answer text above attributes the data to someone else.
         <p className="flex items-center gap-1.5 text-[0.75rem] text-ink/50">
           <Database className="size-3" />
-          Source: {scope.tenant}'s data only · {scope.rows} row{scope.rows === 1 ? "" : "s"} from{" "}
-          {scope.calls} tool call{scope.calls === 1 ? "" : "s"}
+          Source: {scope.tenant}'s data only ·{" "}
+          {(scope.per_call ?? [])
+            .map((call) =>
+              call.chart
+                ? `${call.tool} chart`
+                : `${call.tool} ${call.rows} row${call.rows === 1 ? "" : "s"}`,
+            )
+            .join(", ")}
         </p>
+      )}
+      {injected.length > 0 && (
+        // Stated by the server from the injection detector, not by the model:
+        // whatever the flagged text asked for, the model has no tool that could
+        // carry it out beyond this tenant.
+        <div className="flex items-start gap-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-[0.8rem] text-amber-900">
+          <ShieldAlert className="mt-0.5 size-3.5 shrink-0" />
+          <p>
+            <span className="font-medium">
+              The data included text written to manipulate the AI ({injected.join(", ")}).
+            </span>{" "}
+            It is treated as data, not as instructions: no tool can reach another tenant's rows,
+            whatever that text asks for. Read anything the answer says about it as a report.
+          </p>
+        </div>
       )}
       {claimed.length > 0 && (
         // A table labelled with another tenant reads as a leak even when it is

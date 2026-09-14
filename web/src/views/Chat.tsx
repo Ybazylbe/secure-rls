@@ -2,6 +2,7 @@ import { ArrowUp, Bot, Loader2, User } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 
 import { api, type Answer } from "@/api";
+import { Charts } from "@/components/Chart";
 import { Data } from "@/components/Data";
 import { Grounding } from "@/components/Grounding";
 import { Trace } from "@/components/Trace";
@@ -58,9 +59,9 @@ export function Chat({
 
   return (
     <div className="flex h-full flex-col">
-      <div className="flex-1 space-y-6 overflow-y-auto px-1 pb-6">
+      <div className="flex-1 space-y-6 overflow-y-auto px-1 pt-6 pb-6">
         {turns.length === 0 && !pending && (
-          <div className="pt-6">
+          <div className="pt-1">
             <h2 className="text-xl font-semibold text-teal-deep">Ask about {tenant}'s employees</h2>
             <p className="pt-1 text-sm text-ink/55">
               Every answer is computed from the rows you are allowed to see. Open a step to check
@@ -76,6 +77,7 @@ export function Chat({
               <p className="whitespace-pre-wrap">{turn.answer.text}</p>
               <div className="space-y-3 pt-3">
                 <Grounding answer={turn.answer} />
+                <Charts answer={turn.answer} />
                 <Data answer={turn.answer} />
                 <Trace steps={turn.answer.steps} />
               </div>

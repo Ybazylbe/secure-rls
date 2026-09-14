@@ -2,6 +2,7 @@ import { CircleCheck, CircleDashed, CircleX, Loader2, Play, TriangleAlert } from
 import { useEffect, useState } from "react";
 
 import { api, type AttackRow, type AttackRun, type AttackSpec } from "@/api";
+import { Charts } from "@/components/Chart";
 import { Data } from "@/components/Data";
 import { Grounding } from "@/components/Grounding";
 import { Trace } from "@/components/Trace";
@@ -19,6 +20,7 @@ export function Security({ model }: { model: string }) {
   const [catalogue, setCatalogue] = useState<AttackSpec[]>([]);
   const [report, setReport] = useState<AttackRun | null>(null);
   const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     api.attacks().then(setCatalogue).catch(() => setCatalogue([]));
@@ -27,8 +29,11 @@ export function Security({ model }: { model: string }) {
   /** Run the featured attacks, or all of them, and keep the report. */
   async function run(onlyFeatured: boolean) {
     setBusy(true);
+    setError(null);
     try {
       setReport(await api.runAttacks(model, onlyFeatured));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "The attack run failed");
     } finally {
       setBusy(false);
     }
@@ -73,6 +78,8 @@ export function Security({ model }: { model: string }) {
           Run all {catalogue.length} (slow)
         </Button>
       </div>
+
+      {error && <p className="text-sm text-red-600">{error}</p>}
 
       {report && (
         <Card className={leaked === 0 ? "border-lime/60 bg-lime/8" : "border-red-300 bg-red-50"}>
@@ -154,6 +161,7 @@ export function Security({ model }: { model: string }) {
                       <Disclosure summary={<span className="text-ink/70">what the agent did</span>}>
                         <p className="whitespace-pre-wrap text-[0.82rem]">{outcome.answer.text}</p>
                         <Grounding answer={outcome.answer} />
+                        <Charts answer={outcome.answer} />
                         <Data answer={outcome.answer} />
                         <Trace steps={outcome.answer.steps} />
                       </Disclosure>

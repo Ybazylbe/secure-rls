@@ -44,8 +44,17 @@ export type Answer = {
   retried: boolean;
   ungrounded: number[];
   claimed_tenants: string[];
+  /** Rows the answer is about: picked by the model by label, values taken from the tool results. */
+  selected_rows: Record<string, unknown>[];
+  /** Labels the model picked that match no returned row; they were ignored. */
+  ignored_refs: string[];
   /** Stated by the server: whose data the tools read, how many rows came back, from how many calls. */
-  scope: { tenant: string; rows: number; calls: number };
+  scope: {
+    tenant: string;
+    rows: number;
+    calls: number;
+    per_call: { tool: string; rows: number; chart: boolean }[];
+  };
 };
 
 /** One attack from the catalogue, before it is run. */

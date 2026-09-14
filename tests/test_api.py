@@ -121,6 +121,23 @@ def test_a_forged_cookie_is_refused(client: TestClient) -> None:
     assert client.get("/api/session").status_code == 401
 
 
+def test_a_session_cookie_stops_working_once_it_is_older_than_its_lifetime(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A signature alone proves who wrote the cookie, not when.
+
+    URLSafeSerializer (no timestamp) accepted a cookie for as long as the
+    server process kept running, which for a long-lived deployment is
+    indefinitely. SESSION_MAX_AGE is set to -1 rather than sleeping out the
+    real 8-hour budget: itsdangerous expires a cookie whose age exceeds
+    max_age, and age is 0 within the same second the cookie was issued, so -1
+    is the smallest budget guaranteed to have already been exceeded.
+    """
+    sign_in(client)
+    monkeypatch.setattr(server, "SESSION_MAX_AGE", -1)
+    assert client.get("/api/session").status_code == 401
+
+
 def test_a_tampered_signature_is_refused(client: TestClient) -> None:
     sign_in(client)
     raw = client.cookies[server.COOKIE]

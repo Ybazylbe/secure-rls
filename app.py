@@ -30,7 +30,7 @@ from typing import Annotated, Any
 from fastapi import Cookie, FastAPI, HTTPException, Response
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
-from itsdangerous import BadSignature, URLSafeSerializer
+from itsdangerous import BadSignature, URLSafeTimedSerializer
 from pydantic import BaseModel, ConfigDict, Field
 
 import db
@@ -55,13 +55,19 @@ from secure_rls.security.context import SecurityContext
 #: demo that ships with published credentials.
 SECRET = os.environ.get("SECURE_RLS_SECRET") or secrets.token_urlsafe(32)
 COOKIE = "secure_rls_session"
-_signer = URLSafeSerializer(SECRET, salt="session")
+#: How long a session cookie is honoured, on both sides: the browser drops it
+#: after this and the server refuses it after this even if the browser still
+#: sends it. A plain URLSafeSerializer only proves *who signed* the cookie, not
+#: *when* -- a stolen or merely stale cookie stayed valid for as long as the
+#: process kept running, which for a long-lived server is indefinitely.
+SESSION_MAX_AGE = 8 * 3600
+_signer = URLSafeTimedSerializer(SECRET, salt="session")
 
 #: The side-by-side view's second account. It is a session in its own right,
 #: established by that account's password, and signed with a different salt so
 #: that neither cookie can be replayed as the other.
 PEER_COOKIE = "secure_rls_peer"
-_peer_signer = URLSafeSerializer(SECRET, salt="peer-session")
+_peer_signer = URLSafeTimedSerializer(SECRET, salt="peer-session")
 
 STATIC_DIR = Path(__file__).parent / "web" / "dist"
 
@@ -74,19 +80,26 @@ app = FastAPI(title="Secure RLS Analyst", docs_url="/api/docs")
 
 
 def _context_from_cookie(
-    raw: str | None, signer: URLSafeSerializer = _signer, *, what: str = "session"
+    raw: str | None, signer: URLSafeTimedSerializer = _signer, *, what: str = "session"
 ) -> SecurityContext:
     """Rebuild the caller's identity, or refuse the request.
 
     The cookie holds a username. The tenant is looked up here, server-side, so
     a client cannot assert one however it edits its own request.
+
+    ``max_age`` is checked on every call, not only when the cookie is issued:
+    a signature alone proves who wrote the cookie, not when, so a copied or
+    merely long-forgotten one stayed valid for as long as the server process
+    kept running. `itsdangerous.SignatureExpired` is a `BadSignature`, so it is
+    refused the same way as a tampered one -- the caller only needs to know to
+    sign in again, not which of the two happened.
     """
     if not raw:
         raise HTTPException(status_code=401, detail=f"not signed in ({what})")
     try:
-        username = str(signer.loads(raw))
+        username = str(signer.loads(raw, max_age=SESSION_MAX_AGE))
     except BadSignature as err:
-        raise HTTPException(status_code=401, detail=f"invalid {what}") from err
+        raise HTTPException(status_code=401, detail=f"invalid or expired {what}") from err
 
     account = account_for(username)
     if account is None:
@@ -223,7 +236,7 @@ def login(body: LoginRequest, response: Response) -> dict[str, Any]:
         _signer.dumps(ctx.username),
         httponly=True,
         samesite="lax",
-        max_age=8 * 3600,
+        max_age=SESSION_MAX_AGE,
     )
     return _identity(ctx)
 
@@ -305,7 +318,7 @@ def compare_peer_login(
         _peer_signer.dumps(peer.username),
         httponly=True,
         samesite="lax",
-        max_age=8 * 3600,
+        max_age=SESSION_MAX_AGE,
     )
     return _identity(peer)
 

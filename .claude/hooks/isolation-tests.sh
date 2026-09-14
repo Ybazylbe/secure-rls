@@ -15,7 +15,7 @@ cd "$root" || exit 0
 changed=$(python3 -c 'import json, sys; print(json.load(sys.stdin).get("tool_input", {}).get("file_path", ""))')
 
 case "$changed" in
-  */secure_rls/security/*|*/secure_rls/tools/*|*/db.py|*/api.py|*/secure_rls/auth.py|*/secure_rls/oracle.py|*/secure_rls/redteam.py) ;;
+  */secure_rls/security/*|*/secure_rls/tools/*|*/db.py|*/app.py|*/secure_rls/auth.py|*/secure_rls/oracle.py|*/secure_rls/redteam.py) ;;
   *) exit 0 ;;
 esac
 

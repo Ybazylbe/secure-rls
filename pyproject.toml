@@ -35,7 +35,7 @@ files = ["secure_rls", "db.py", "scripts", "evals"]
 # Third parties without usable stubs. Listed explicitly rather than globally
 # silenced, so adding a dependency is a deliberate decision.
 module = [
-    "faiss.*", "sentence_transformers.*", "streamlit.*", "plotly.*",
+    "faiss.*", "sentence_transformers.*", 
     "pandas.*", "sqlglot.*", "langchain_core.*", "langchain_ollama.*",
     "langgraph.*",
 ]

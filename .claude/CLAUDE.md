@@ -24,12 +24,12 @@ depth, never a control.
 Three places above the line still carry a security claim, and are treated as if
 they were below it:
 
-- **`api.py` and `secure_rls/auth.py` decide who the caller is.** The API must
+- **`app.py` and `secure_rls/auth.py` decide who the caller is.** The API must
   build the `SecurityContext` from the signed session and nothing else. An
   endpoint that constructs a context for a *different* tenant and returns what
   it produced hands that tenant's data to the caller -- every layer below then
-  holds perfectly and the data leaks anyway. `/api/compare` and the Streamlit
-  side-by-side tab once did exactly this; the second side is now a separate
+  holds perfectly and the data leaks anyway. `/api/compare` once did exactly
+  this; the second side is now a separate
   sign-in with its own password and cookie (`secure_rls_peer`, different salt).
   `tests/test_api.py` pins that the old request shape is refused.
 - **Tool schemas in `secure_rls/tools/__init__.py`** are the model's whole
@@ -41,7 +41,7 @@ they were below it:
 
 ## Working in this repository
 
-- Changing anything under `secure_rls/security/`, `db.py`, `api.py`,
+- Changing anything under `secure_rls/security/`, `db.py`, `app.py`,
   `secure_rls/auth.py` or the tool schemas requires the isolation tests to pass,
   and normally requires a new test. A hook (`.claude/hooks/isolation-tests.sh`)
   runs them after every such edit and reports a failure back. A change that
@@ -79,9 +79,8 @@ python -m pytest -m "not slow"       # fast suite, no model needed
 python -m pytest -m slow             # retrieval tests (downloads embeddings)
 python -m ruff check . && python -m mypy
 npm --prefix web run build           # type-check and bundle the front end
-uvicorn api:app --port 8000          # API (serves web/dist when built); needs Ollama
+uvicorn app:app --port 8000          # the app: API, and web/dist when built; needs Ollama
 npm --prefix web run dev             # React dev server on :5173, proxies /api to :8000
-streamlit run app.py                 # the fallback UI on :8501
 python -m evals --limit 4            # evaluation smoke run
 python -m evals.benchmark --models all   # compare the three models (about an hour)
 python -m evals.retrieval            # note search quality, no language model needed

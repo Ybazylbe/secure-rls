@@ -1,859 +1,448 @@
-"""Streamlit front end for the secure multi-tenant analyst.
+"""HTTP API behind the React front end.
 
-In plain terms: A second, simpler interface built with Streamlit. It offers the
-same four views as the React app (chat, attacks, side by side, audit) on top of
-the same tools.
+In plain terms: The web server behind the React app. Every request finds out
+who the user is from a signed cookie, then calls the agent, the attack suite or
+the audit log on that user's behalf. The browser can never say which tenant it
+belongs to.
 
-The interface has a second job besides being usable: it has to make the
-isolation *visible*. Claiming that one tenant cannot see another is not
-convincing; running the same question as two different users side by side, and
-showing the SQL that was actually executed, is.
+The browser never states who it is. A signed cookie carries a username and
+nothing else; every request rebuilds the :class:`SecurityContext` on the server
+from that name, and the tenant comes from the account table rather than from
+anything the client sent. Forging a tenant therefore requires the signing key,
+not a modified request body -- which is the same L1 property the Streamlit app
+has, expressed somewhere it is easier to check.
 
-So four views:
-
-* **Chat** -- the product itself, with the reasoning trace and the guarded SQL
-  on display rather than hidden behind a spinner.
-* **Security** -- the attack catalogue, run live, with a verdict per attack.
-* **Side by side** -- one question, two tenants, two answers.
-* **Audit** -- what the system recorded while you were doing all that.
-
-Nothing here enforces anything. Every control lives below this file, and the UI
-only reports what happened.
+Everything below this file is unchanged: the same guarded tools, the same five
+layers, the same tests. Swapping the interface was deliberately not allowed to
+touch them.
 """
 
 from __future__ import annotations
 
+import os
+import secrets
 import time
-from typing import Any
+from pathlib import Path
+from typing import Annotated, Any
 
-import streamlit as st
+from fastapi import Cookie, FastAPI, HTTPException, Response
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
+from itsdangerous import BadSignature, URLSafeSerializer
+from pydantic import BaseModel, ConfigDict, Field
 
 import db
-from agent import AgentAnswer, ask, build_agent
+from agent import AgentAnswer, Step, ask, build_agent
 from secure_rls.auth import authenticate, demo_accounts
 from secure_rls.llm import DEFAULT_MODEL, MODELS
-from secure_rls.redteam import ATTACKS, Attack, exercised, featured, prompt_for, verdict
-from secure_rls.security.audit import AuditLog
+from secure_rls.redteam import (
+    ATTACKS,
+    Attack,
+    exercised,
+    featured,
+    not_exercised_reason,
+    prompt_for,
+    verdict,
+)
+from secure_rls.security.audit import AUDIT
 from secure_rls.security.context import SecurityContext
 
-st.set_page_config(
-    page_title="Secure RLS Analyst",
-    page_icon="🔐",
-    layout="wide",
-    initial_sidebar_state="expanded",
-)
+#: Sessions are signed, not encrypted -- the cookie's contents are not secret,
+#: its authorship is. Regenerated per process unless pinned, so restarting the
+#: server invalidates outstanding sessions, which is the safer default for a
+#: demo that ships with published credentials.
+SECRET = os.environ.get("SECURE_RLS_SECRET") or secrets.token_urlsafe(32)
+COOKIE = "secure_rls_session"
+_signer = URLSafeSerializer(SECRET, salt="session")
 
-#: One palette, defined once. Streamlit's defaults suit a dashboard; this is a
-#: chat, and it should look like the product it is pretending to be.
-TEAL_DEEP = "#0E5A68"
-TEAL = "#0B7E92"
-CYAN = "#00AECD"
-LIME = "#B9D22C"
-SURFACE = "#F2F7F9"
-BORDER = "#D9E5E9"
+#: The side-by-side view's second account. It is a session in its own right,
+#: established by that account's password, and signed with a different salt so
+#: that neither cookie can be replayed as the other.
+PEER_COOKIE = "secure_rls_peer"
+_peer_signer = URLSafeSerializer(SECRET, salt="peer-session")
 
-#: Selectors are scoped to Streamlit's stable test ids and to element keys
-#: (`st-key-<key>`), so they do not bleed into widgets they were not meant for.
-STYLE = f"""
-<style>
-  :root {{
-      --teal-deep: {TEAL_DEEP};
-      --teal: {TEAL};
-      --cyan: {CYAN};
-      --lime: {LIME};
-      --surface: {SURFACE};
-      --line: {BORDER};
-  }}
+STATIC_DIR = Path(__file__).parent / "web" / "dist"
 
-  /* Streamlit's header is a 60px band floating over the page at z-index
-     999990, holding only the Deploy menu on the right. The content starts at
-     the very top so the navigation sits inside that band, on the same line as
-     Deploy, rather than below it. */
-  [data-testid="stMainBlockContainer"] {{
-      max-width: 1080px;
-      padding-top: 0;
-  }}
-  /* Transparent so the navigation bar shows through the band it shares with
-     the Deploy menu. The bar sits above the header in z-order because the
-     header's toolbar spans the full width and would otherwise swallow every
-     click on the pills; the two do not overlap horizontally, so nothing is
-     hidden and the menu stays clickable where it actually is. */
-  [data-testid="stHeader"] {{ background: transparent; }}
-
-  /* ---- the navigation bar: its own panel, pinned to the top ---- */
-  [class*="st-key-navbar"] {{
-      position: sticky;
-      top: 0;
-      z-index: 999991;
-      min-height: 60px;
-      display: flex;
-      align-items: center;
-      background: #fff;
-      border-bottom: 1px solid var(--line);
-      margin-bottom: 1.2rem;
-
-  }}
-  [class*="st-key-navbar"] > div {{ width: 100%; }}
-
-  /* The segmented control renders as buttons carrying aria-checked, not as
-     radio inputs, so the selected pill has to be matched on that attribute. */
-  [class*="st-key-navbar"] button[data-variant="segmented_control"] {{
-      border-radius: 999px !important;
-      padding: .34rem 1.05rem !important;
-      font-size: .88rem !important;
-      font-weight: 500 !important;
-      border: 1px solid transparent !important;
-      background: transparent !important;
-      color: var(--teal-deep) !important;
-  }}
-  /* The hover tint must not land on the selected pill: it repaints the teal
-     fill in pale grey while the label stays white, and the active tab becomes
-     unreadable the moment the pointer crosses it. */
-  [class*="st-key-navbar"]
-      button[data-variant="segmented_control"]:not([aria-checked="true"]):hover {{
-      background: var(--surface) !important;
-  }}
-  [class*="st-key-navbar"] button[aria-checked="true"]:hover {{
-      background: var(--teal) !important;
-  }}
-  [class*="st-key-navbar"] button[aria-checked="true"] {{
-      background: var(--teal-deep) !important;
-      border-color: var(--teal-deep) !important;
-      color: #fff !important;
-  }}
-  [class*="st-key-navbar"] button[aria-checked="true"] * {{ color: #fff !important; }}
-
-  /* ---- sidebar: model on top, conversations beneath ---- */
-  [data-testid="stSidebar"] {{
-      background: var(--surface);
-      border-right: 1px solid var(--line);
-  }}
-  [data-testid="stSidebar"] h5 {{
-      color: var(--teal-deep);
-      margin: 0;
-      padding: 0;
-  }}
-  /* Streamlit's sidebar is generous with space it does not need: a 16px gap
-     between every block, 49px per divider and 96px of floor padding add up to
-     most of a screen. Tightened, and the column is made full height so the
-     conversation list can grow and the sign-out button can sit at the bottom. */
-  [data-testid="stSidebarHeader"] {{ height: 2.4rem; padding-bottom: 0; }}
-  [data-testid="stSidebarUserContent"] {{ padding-top: .2rem; padding-bottom: 1rem; }}
-  [data-testid="stSidebarUserContent"] > div > [data-testid="stVerticalBlock"] {{
-      gap: .55rem;
-      min-height: calc(100vh - 4.6rem);
-  }}
-  [data-testid="stSidebar"] hr {{ margin: .5rem 0; }}
-  /* The keyed container is nested a couple of wrappers deep, so the auto
-     margin has to go on whichever direct child of the full-height column holds
-     it -- setting it on the container itself does nothing, because that element
-     is not a flex item of the column. */
-  [data-testid="stSidebarUserContent"] > div > [data-testid="stVerticalBlock"]
-      > *:has([class*="st-key-signout"]) {{ margin-top: auto; }}
-  [class*="st-key-chat_"] button {{
-      justify-content: flex-start !important;
-      text-align: left !important;
-      border: none !important;
-      background: transparent !important;
-      color: var(--teal-deep) !important;
-      font-weight: 400 !important;
-      padding: .3rem .55rem !important;
-      min-height: 0 !important;
-      border-radius: 8px !important;
-  }}
-  [class*="st-key-chat_"] button:hover {{ background: rgba(0,174,205,.12) !important; }}
-  [class*="st-key-chat_active"] button {{
-      background: rgba(0,174,205,.18) !important;
-      font-weight: 600 !important;
-  }}
-  [class*="st-key-new_chat"] button {{
-      border-radius: 999px !important;
-      border: 1px solid var(--cyan) !important;
-      color: var(--teal-deep) !important;
-      font-weight: 600 !important;
-  }}
-
-  /* ---- messages ---- */
-  [data-testid="stChatMessage"] {{
-      background: transparent;
-      padding: .1rem 0 .45rem 0;
-      gap: .7rem;
-  }}
-  [data-testid="stChatMessage"] [data-testid="stChatMessageContent"] {{
-      background: #fff;
-      border: 1px solid var(--line);
-      border-radius: 18px;
-      padding: .75rem 1.05rem;
-      flex: 0 1 auto;
-      min-width: 0;
-  }}
-  [data-testid="stChatMessage"]:has([data-testid="stChatMessageAvatarAssistant"])
-      [data-testid="stChatMessageContent"] {{ flex: 1 1 auto; }}
-  [data-testid="stChatMessage"]:has([data-testid="stChatMessageAvatarUser"]) {{
-      flex-direction: row-reverse;
-      justify-content: flex-start;
-  }}
-  [data-testid="stChatMessage"]:has([data-testid="stChatMessageAvatarUser"])
-      [data-testid="stChatMessageContent"] {{
-      max-width: 72%;
-      background: var(--teal-deep);
-      border-color: var(--teal-deep);
-      color: #fff;
-  }}
-
-  /* ---- suggestion chips ---- */
-  [class*="st-key-chip_"] button {{
-      border-radius: 999px !important;
-      padding: .2rem .85rem !important;
-      font-size: .8rem !important;
-      font-weight: 450 !important;
-      min-height: 0 !important;
-      border: 1px solid var(--line) !important;
-      background: #fff !important;
-      color: var(--teal) !important;
-  }}
-  [class*="st-key-chip_"] button:hover {{
-      border-color: var(--cyan) !important;
-      background: rgba(0,174,205,.08) !important;
-  }}
-
-  /* ---- the composer, as a single rounded pill ---- */
-  [data-testid="stChatInput"] {{
-      border-radius: 999px !important;
-      border: 1px solid var(--line) !important;
-      background: #fff !important;
-      box-shadow: 0 3px 18px rgba(14,90,104,.10);
-      padding: .1rem .35rem .1rem 1rem;
-  }}
-  [data-testid="stChatInput"] textarea {{ padding-top: .55rem !important; }}
-  [data-testid="stChatInputSubmitButton"] {{
-      border-radius: 999px !important;
-      background: var(--cyan) !important;
-      color: #fff !important;
-  }}
-  [data-testid="stBottomBlockContainer"] {{ padding-bottom: 1.1rem; }}
-
-  /* ---- the reasoning trace reads as a footnote, not a second answer ---- */
-  [data-testid="stExpander"] details {{
-      border: 1px solid var(--line);
-      border-radius: 12px;
-      background: var(--surface);
-  }}
-  [data-testid="stExpander"] summary {{ font-size: .85rem; }}
-
-  h1, h2, h3, h4 {{ color: var(--teal-deep); }}
-</style>
-"""
-
-SUGGESTIONS = (
-    ("Avg salary", "What is the average salary in Engineering?"),
-    ("By department", "Which departments have the highest average salary?"),
-    ("Outliers", "Which employees have an unusual salary for their department?"),
-    ("Top earners", "List the five highest paid employees with their departments."),
-    ("Notes", "Who is flagged as a retention risk in the review notes?"),
-)
+app = FastAPI(title="Secure RLS Analyst", docs_url="/api/docs")
 
 
 # ---------------------------------------------------------------------------
-# Shared resources
+# Session
 # ---------------------------------------------------------------------------
 
 
-@st.cache_resource(show_spinner="Loading the dataset...")
-def _database() -> int:
-    """Load the dataset once per Streamlit server process."""
-    return db.init_db()
+def _context_from_cookie(
+    raw: str | None, signer: URLSafeSerializer = _signer, *, what: str = "session"
+) -> SecurityContext:
+    """Rebuild the caller's identity, or refuse the request.
 
-
-@st.cache_resource(show_spinner=False)
-def _audit_log() -> AuditLog:
-    """One audit log shared by every session in this Streamlit process."""
-    return AuditLog()
-
-
-@st.cache_resource(show_spinner="Starting the agent...")
-def _agent(username: str, tenant: str, role: str, user_id: int, model: str) -> Any:
-    """One compiled graph per (user, model).
-
-    Cached on primitives rather than on the context object so that Streamlit's
-    hashing cannot accidentally share a graph between tenants -- the tenant is
-    part of the key, and the graph closes over the context built from it.
+    The cookie holds a username. The tenant is looked up here, server-side, so
+    a client cannot assert one however it edits its own request.
     """
-    ctx = SecurityContext(user_id=user_id, username=username, tenant_id=tenant, role=role)
-    return build_agent(ctx, _audit_log(), model=model)
+    if not raw:
+        raise HTTPException(status_code=401, detail=f"not signed in ({what})")
+    try:
+        username = str(signer.loads(raw))
+    except BadSignature as err:
+        raise HTTPException(status_code=401, detail=f"invalid {what}") from err
+
+    for name, tenant in demo_accounts():
+        if name == username:
+            from secure_rls.auth import USER_IDS
+
+            return SecurityContext(
+                user_id=USER_IDS[name], username=name, tenant_id=tenant, role="analyst"
+            )
+    raise HTTPException(status_code=401, detail="unknown account")
 
 
-def _ask(question: str, ctx: SecurityContext, model: str) -> AgentAnswer:
-    """Answer a question as the given user, reusing that user's cached agent."""
-    agent = _agent(ctx.username, ctx.tenant_id, ctx.role, ctx.user_id, model)
-    return ask(question, ctx, _audit_log(), model=model, agent=agent)
+Session = Annotated[str | None, Cookie(alias=COOKIE)]
+PeerSession = Annotated[str | None, Cookie(alias=PEER_COOKIE)]
 
 
 # ---------------------------------------------------------------------------
-# Login
+# Wire formats
 # ---------------------------------------------------------------------------
 
 
-def _chats() -> dict[str, dict[str, Any]]:
-    """Every conversation this session has held.
+class LoginRequest(BaseModel):
+    """Body of a sign-in request: a username and a password."""
+    username: str
+    password: str
 
-    Kept in session state and never written to disk. Transcripts contain the
-    tenant's own employee data, and a file on the presenter's laptop is exactly
-    the kind of quiet copy this whole project exists to avoid. Signing out
-    clears them with the rest of the session.
+
+class AskRequest(BaseModel):
+    """Body of a chat question: the question text and which model to use."""
+    question: str = Field(min_length=1, max_length=2000)
+    model: str = DEFAULT_MODEL
+
+
+class CompareRequest(AskRequest):
+    # No tenant field, and unknown fields are refused: a client still sending
+    # `other_tenant` gets a 422 rather than a request that silently means
+    # something else. The second side comes from the peer session alone.
+    """Body of a side-by-side question. Same as a chat question, with no extra fields allowed."""
+    model_config = ConfigDict(extra="forbid")
+
+
+class AttackRequest(BaseModel):
+    """Body of an attack run: which model, and whether to run only the featured attacks."""
+    model: str = DEFAULT_MODEL
+    only_featured: bool = True
+
+
+def _step_payload(step: Step) -> dict[str, Any]:
+    """Turn one agent step into JSON for the browser: the call, what ran, what came back."""
+    result = step.result
+    return {
+        "tool": step.tool,
+        "arguments": step.arguments,
+        "state": (
+            "rejected"
+            if step.rejected
+            else "skipped"
+            if step.skipped
+            else "unverifiable"
+            if step.unverifiable
+            else "ok"
+        ),
+        "error": step.error,
+        "refused": bool(result and result.refused),
+        "reason": result.reason if result else None,
+        "sql": result.sql if result else None,
+        "rewrites": list(result.rewrites) if result else [],
+        "flags": list(result.flags) if result else [],
+        "rows": [dict(row) for row in result.rows[:200]] if result else [],
+        "row_count": len(result.rows) if result else 0,
+        "chart": result.chart if result else None,
+    }
+
+
+def _answer_payload(answer: AgentAnswer, ctx: SecurityContext) -> dict[str, Any]:
+    """Turn a whole agent answer into JSON for the browser.
+
+    ``scope`` is stated by the server, not by the model: whose data the tools
+    could read for this answer, and how much of it came back. It sits next to
+    the answer so that a model labelling rows as another tenant's is
+    contradicted on the same screen by something it did not write.
     """
-    return st.session_state.setdefault("chats", {})
+    ran = [step for step in answer.steps if step.result is not None and not step.result.refused]
+    return {
+        "text": answer.text,
+        "steps": [_step_payload(s) for s in answer.steps],
+        "charts": answer.charts,
+        "flags": answer.flags,
+        "retried": answer.retried,
+        "ungrounded": list(answer.ungrounded),
+        "claimed_tenants": list(answer.claimed_tenants),
+        "scope": {
+            "tenant": ctx.tenant_id,
+            "rows": sum(len(step.result.rows) for step in ran if step.result is not None),
+            "calls": len(ran),
+        },
+    }
 
 
-def _start_chat() -> str:
-    """Create a new empty conversation and make it the current one."""
-    chat_id = f"c{int(time.time() * 1000)}"
-    _chats()[chat_id] = {"title": "New conversation", "turns": []}
-    st.session_state["current_chat"] = chat_id
-    return chat_id
+# ---------------------------------------------------------------------------
+# Routes
+# ---------------------------------------------------------------------------
 
 
-def _current_chat() -> dict[str, Any]:
-    """Return the conversation on screen, creating one if there is none."""
-    chats = _chats()
-    chat_id = st.session_state.get("current_chat")
-    if chat_id not in chats:
-        chat_id = _start_chat()
-    return chats[chat_id]
+@app.on_event("startup")
+def _load_data() -> None:
+    """On startup, load employees.csv into SQLite if it is not loaded yet."""
+    db.init_db()
 
 
-def login_screen() -> None:
-    """Draw the sign-in form and the table of demo accounts."""
-    st.title("🔐 Secure RLS Analyst")
-    st.caption(
-        "A conversational analyst over multi-tenant HR data. The tenant is fixed "
-        "at login and cannot be changed by anything you or the model say."
+@app.post("/api/login")
+def login(body: LoginRequest, response: Response) -> dict[str, Any]:
+    """Check a username and password and, if they are right, set the signed session cookie."""
+    ctx = authenticate(body.username, body.password)
+    if ctx is None:
+        raise HTTPException(status_code=401, detail="Incorrect username or password")
+    response.set_cookie(
+        COOKIE,
+        _signer.dumps(ctx.username),
+        httponly=True,
+        samesite="lax",
+        max_age=8 * 3600,
     )
-    left, right = st.columns([2, 3])
-    with left, st.form("login"):
-        username = st.text_input("Username")
-        password = st.text_input("Password", type="password")
-        if st.form_submit_button("Sign in", use_container_width=True):
-            ctx = authenticate(username, password)
-            if ctx is None:
-                st.error("Incorrect username or password.")
-            else:
-                st.session_state["ctx"] = ctx
-                st.rerun()
-    with right:
-        st.markdown("**Demo accounts**")
-        st.table(
-            [
-                {"user": name, "tenant": tenant, "password": f"{tenant}-demo-2026"}
-                for name, tenant in demo_accounts()
-            ]
-        )
-        st.caption(
-            "alice and arthur share a tenant on purpose: the boundary is the "
-            "tenant, not the individual."
-        )
+    return _identity(ctx)
 
 
-# ---------------------------------------------------------------------------
-# Rendering helpers
-# ---------------------------------------------------------------------------
+@app.post("/api/logout")
+def logout(response: Response) -> dict[str, bool]:
+    """Sign out: remove the session cookie and the side-by-side second-account cookie."""
+    response.delete_cookie(COOKIE)
+    response.delete_cookie(PEER_COOKIE)
+    return {"ok": True}
 
 
-def render_chart(spec: dict[str, Any]) -> None:
-    """Draw one chart returned by the plot tool, using Plotly."""
-    import pandas as pd
-    import plotly.express as px
-
-    frame = pd.DataFrame(spec["data"])
-    if frame.empty:
-        st.info("No data to chart.")
-        return
-    if spec["type"] == "bar":
-        figure = px.bar(frame, x=spec["x"], y=spec["y"], title=spec["title"])
-    elif spec["type"] == "histogram":
-        figure = px.histogram(frame, x=spec["x"], title=spec["title"])
-    else:
-        figure = px.box(frame, x=spec["x"], y=spec["y"], title=spec["title"])
-    st.plotly_chart(figure, use_container_width=True)
+@app.get("/api/session")
+def session(secure_rls_session: Session = None) -> dict[str, Any]:
+    """Return who is signed in, which tenant they belong to, and how many rows they can see."""
+    return _identity(_context_from_cookie(secure_rls_session))
 
 
-def render_data(answer: AgentAnswer) -> None:
-    """Show the rows behind the answer, straight from the last tool result.
+def _identity(ctx: SecurityContext) -> dict[str, Any]:
+    """The public description of a signed-in user that the browser is allowed to see."""
+    return {
+        "username": ctx.username,
+        "tenant": ctx.tenant_id,
+        "role": ctx.role,
+        "rows": db.row_count(ctx),
+    }
 
-    The model does not get to present data: any table it writes is removed from
-    its text by the agent, and this is where the real rows appear instead.
-    """
-    with_rows = [
-        (step.tool, step.result.rows) for step in answer.steps
-        if step.result is not None and not step.result.refused and step.result.rows
+
+@app.get("/api/models")
+def models() -> list[dict[str, str]]:
+    """List the models the user can choose from, with origin and licence."""
+    return [
+        {"tag": spec.tag, "origin": spec.origin, "licence": spec.licence, "note": spec.note}
+        for spec in MODELS.values()
     ]
-    if not with_rows:
-        return
-    tool, rows = with_rows[-1]
-    st.caption(f"Data from `{tool}` · {len(rows)} row(s)")
-    st.dataframe(list(rows), use_container_width=True, **({"height": 260} if len(rows) > 7 else {}))
 
 
-def render_grounding(answer: AgentAnswer) -> None:
-    """Flag figures the model wrote that no tool returned.
+@app.get("/api/accounts")
+def accounts() -> list[dict[str, str]]:
+    """Demo credentials, served so the login screen can list them."""
+    return [
+        {"username": name, "tenant": tenant, "password": f"{tenant}-demo-2026"}
+        for name, tenant in demo_accounts()
+    ]
 
-    The containment verdict is silent about invented content, so an answer can
-    keep every foreign row out and still print a fabricated table.
+
+@app.post("/api/ask")
+def ask_question(body: AskRequest, secure_rls_session: Session = None) -> dict[str, Any]:
+    """Answer a chat question as the signed-in user."""
+    ctx = _context_from_cookie(secure_rls_session)
+    _check_model(body.model)
+    answer = ask(body.question, ctx, AUDIT, model=body.model)
+    return _answer_payload(answer, ctx)
+
+
+# The side-by-side view. It used to build the second tenant's context on the
+# server from a tenant name in the request and return what that context
+# produced -- which handed any signed-in user another tenant's rows, names and
+# salaries included, while every layer below held perfectly. Now the second side
+# is a real sign-in: the data shown for a tenant goes only to a browser that
+# holds that tenant's password.
+
+
+@app.post("/api/compare/peer")
+def compare_peer_login(
+    body: LoginRequest, response: Response, secure_rls_session: Session = None
+) -> dict[str, Any]:
+    """Sign in the second account for the side-by-side view."""
+    ctx = _context_from_cookie(secure_rls_session)
+    peer = authenticate(body.username, body.password)
+    if peer is None:
+        raise HTTPException(status_code=401, detail="Incorrect username or password")
+    if peer.tenant_id == ctx.tenant_id:
+        raise HTTPException(
+            status_code=400, detail="the second account must belong to a different tenant"
+        )
+    response.set_cookie(
+        PEER_COOKIE,
+        _peer_signer.dumps(peer.username),
+        httponly=True,
+        samesite="lax",
+        max_age=8 * 3600,
+    )
+    return _identity(peer)
+
+
+@app.get("/api/compare/peer")
+def compare_peer(
+    secure_rls_session: Session = None, secure_rls_peer: PeerSession = None
+) -> dict[str, Any]:
+    """Return the second account signed in for the side-by-side view, or 401 if there is none."""
+    _context_from_cookie(secure_rls_session)
+    return _identity(_peer_context(secure_rls_session, secure_rls_peer))
+
+
+@app.post("/api/compare/peer/logout")
+def compare_peer_logout(response: Response) -> dict[str, bool]:
+    """Sign out the side-by-side second account only."""
+    response.delete_cookie(PEER_COOKIE)
+    return {"ok": True}
+
+
+@app.post("/api/compare")
+def compare(
+    body: CompareRequest,
+    secure_rls_session: Session = None,
+    secure_rls_peer: PeerSession = None,
+) -> dict[str, Any]:
+    """The same question, answered for two accounts that are both signed in."""
+    ctx = _context_from_cookie(secure_rls_session)
+    peer = _peer_context(secure_rls_session, secure_rls_peer)
+    _check_model(body.model)
+    mine = _answer_payload(ask(body.question, ctx, AUDIT, model=body.model), ctx)
+    theirs = _answer_payload(ask(body.question, peer, AUDIT, model=body.model), peer)
+    return {
+        "mine": {"tenant": ctx.tenant_id, **mine},
+        "theirs": {"tenant": peer.tenant_id, **theirs},
+    }
+
+
+def _peer_context(primary: str | None, raw: str | None) -> SecurityContext:
+    """The second account, which must still be a different tenant from the first.
+
+    Checked on every request, not only at sign-in: the primary session can
+    change underneath a peer cookie (sign out, sign in as someone else).
     """
-    if answer.claimed_tenants:
-        st.warning(
-            f"The answer presents rows for {', '.join(answer.claimed_tenants)}. No tool "
-            "result contains rows for that tenant, so the model wrote them itself; treat "
-            "that part of the answer as false."
+    ctx = _context_from_cookie(primary)
+    peer = _context_from_cookie(raw, _peer_signer, what="second account")
+    if peer.tenant_id == ctx.tenant_id:
+        raise HTTPException(
+            status_code=400, detail="the second account must belong to a different tenant"
         )
-    if answer.ungrounded:
-        figures = ", ".join(f"{n:,.2f}".rstrip("0").rstrip(".") for n in answer.ungrounded[:8])
-        st.warning(
-            f"Not from any tool result: {figures}. The model wrote these figures "
-            "itself; treat them as unverified."
-        )
+    return peer
 
 
-def render_trace(answer: AgentAnswer) -> None:
-    """The reasoning trace: what the agent did, and what the guard changed."""
-    if not answer.steps:
-        st.caption("The agent answered without calling a tool.")
-        return
-    for index, step in enumerate(answer.steps, start=1):
-        result = step.result
-        if step.rejected:
-            status, icon = "rejected", "🚫"
-        elif step.skipped:
-            status, icon = "skipped", "⏭️"
-        elif step.unverifiable:
-            status, icon = "unrecorded", "⚠️"
-        elif result is not None and result.refused:
-            status, icon = "refused", "🚫"
-        else:
-            status, icon = "ok", "✅"
-        with st.expander(f"{icon} step {index}: `{step.tool}`", expanded=status != "ok"):
-            st.json(step.arguments, expanded=False)
-            if step.rejected:
-                st.error(
-                    "The call was refused before it ran: the arguments are not ones "
-                    "this tool declares. Nothing was executed."
-                )
-                st.code(step.error or "", language="text")
-                continue
-            if step.skipped:
-                st.info(
-                    "The step limit was reached before this call was dispatched, so "
-                    "it never ran."
-                )
-                continue
-            if result is None:
-                st.warning(
-                    "The tool ran but its output was not recorded, so nothing here "
-                    "can be verified. Restart the app if this persists."
-                )
-                continue
-            if result.refused:
-                st.error(result.reason or "refused")
-                continue
-            if result.sql:
-                st.markdown("**SQL actually executed** (after the guard rewrote it)")
-                st.code(result.sql, language="sql")
-            for note in result.rewrites:
-                st.caption(f"guard: {note}")
-            if result.flags:
-                st.warning(
-                    "Untrusted content in this result: " + ", ".join(result.flags)
-                )
-            if result.rows:
-                # Only cap the height once there are enough rows to need
-                # scrolling. A fixed height pads a one-row aggregate out with
-                # blank rows, which reads as missing data rather than as a
-                # single result.
-                st.dataframe(
-                    list(result.rows),
-                    use_container_width=True,
-                    **({"height": 260} if len(result.rows) > 7 else {}),
-                )
-            if result.chart:
-                render_chart(result.chart)
+@app.get("/api/attacks")
+def attack_catalogue() -> list[dict[str, Any]]:
+    """List every attack in the catalogue, without running anything."""
+    return [
+        {
+            "id": a.id,
+            "category": a.category,
+            "prompt": a.prompt.replace("{carrier}", "<an employee with an injected note>"),
+            "intent": a.intent,
+            "featured": a.featured,
+        }
+        for a in ATTACKS
+    ]
 
 
-def tenant_badge(ctx: SecurityContext, rows: int) -> None:
-    """Two lines, not four. Who you are is context, not the headline."""
-    st.markdown(f"##### Tenant `{ctx.tenant_id}`")
-    st.caption(f"{ctx.username} · {ctx.role} · **{rows}** employees visible")
+@app.post("/api/attacks/run")
+def run_attacks(body: AttackRequest, secure_rls_session: Session = None) -> dict[str, Any]:
+    """Run the attacks as the signed-in user and report whether any foreign data got out."""
+    ctx = _context_from_cookie(secure_rls_session)
+    _check_model(body.model)
+    selected: tuple[Attack, ...] = featured() if body.only_featured else ATTACKS
 
-
-# ---------------------------------------------------------------------------
-# Tabs
-# ---------------------------------------------------------------------------
-
-
-def chat_view(ctx: SecurityContext, model: str, question: str | None) -> None:
-    """Transcript above, chips at the foot of it, composer pinned below.
-
-    ``question`` arrives from the composer, which lives in :func:`main` because
-    Streamlit only pins ``chat_input`` to the bottom of the window when it is a
-    top-level element. Everything rendered here therefore sits above it.
-    """
-    chat = _current_chat()
-    turns: list[dict[str, Any]] = chat["turns"]
-
-    if not turns and not question:
-        st.markdown(f"#### Ask about {ctx.tenant_id}'s employees")
-        st.caption(
-            "Every answer is computed from the rows you are allowed to see. "
-            "Open a step to check the SQL that ran."
-        )
-
-    for turn in turns:
-        with st.chat_message("user"):
-            st.write(turn["question"])
-        with st.chat_message("assistant"):
-            st.write(turn["answer"].text)
-            render_grounding(turn["answer"])
-            render_data(turn["answer"])
-            for chart in turn["answer"].charts:
-                render_chart(chart)
-            render_trace(turn["answer"])
-
-    if question:
-        with st.chat_message("user"):
-            st.write(question)
-        with st.chat_message("assistant"), st.spinner("Thinking..."):
-            answer = _ask(question, ctx, model)
-            st.write(answer.text)
-            render_grounding(answer)
-            render_data(answer)
-            for chart in answer.charts:
-                render_chart(chart)
-            render_trace(answer)
-        turns.append({"question": question, "answer": answer})
-        if chat["title"] == "New conversation":
-            chat["title"] = question[:42] + ("..." if len(question) > 42 else "")
-            # The sidebar was drawn before this answer existed, so it still
-            # shows the placeholder name. Rerunning costs nothing -- the turn is
-            # already in the transcript and is simply redrawn from it.
-            st.rerun()
-
-    _suggestion_chips()
-
-
-def _suggestion_chips() -> str | None:
-    """A row of chips at the foot of the transcript, just above the composer."""
-    st.caption("Try")
-    # A trailing spacer column keeps the chips at their natural width instead of
-    # stretching each one across an equal share of the row.
-    # The trailing spacer keeps the chips at their natural width instead of
-    # stretching each across an equal share of the row; it is not paired with a
-    # suggestion, hence the slice.
-    columns = st.columns([*(1 for _ in SUGGESTIONS), 2], gap="small")
-    for index, (column, (label, prompt)) in enumerate(
-        zip(columns[: len(SUGGESTIONS)], SUGGESTIONS, strict=True)
-    ):
-        if column.button(label, key=f"chip_{index}", help=prompt):
-            st.session_state["pending"] = prompt
-            st.rerun()
-    return None
-
-
-def security_tab(ctx: SecurityContext, model: str) -> None:
-    """The Security view: buttons to run attacks, and the results of the last run."""
-    st.markdown(
-        "Each attack is put to the agent as a real question. The verdict looks at "
-        "the **data returned**, not at how the answer is phrased: an attack is "
-        "contained when every row the tools produced belongs to the signed-in "
-        "tenant."
-    )
-    st.caption(
-        "A local 12B model needs roughly 20-30 seconds per attack, so the full "
-        "catalogue is a job for CI rather than for a live audience. The featured "
-        "set is the one to run in front of people."
-    )
-
-    quick, full = st.columns(2)
-    run_quick = quick.button(
-        f"Run the featured {len(featured())} attacks", use_container_width=True
-    )
-    run_full = full.button(
-        f"Run all {len(ATTACKS)} attacks (slow)", use_container_width=True
-    )
-
-    if run_quick or run_full:
-        selected: tuple[Attack, ...] = ATTACKS if run_full else featured()
-        # Results live in session state rather than in local variables: any
-        # later interaction reruns the script, and a demo that loses its
-        # evidence the moment someone clicks something else is worse than no
-        # demo at all.
-        st.session_state["attack_results"] = _run_attacks(selected, ctx, model)
-
-    results = st.session_state.get("attack_results")
-    if not results:
-        _attack_catalogue()
-        return
-    _render_results(results)
-
-
-def _run_attacks(
-    selected: tuple[Attack, ...], ctx: SecurityContext, model: str
-) -> list[dict[str, Any]]:
-    """Run the chosen attacks one by one as the signed-in user, with a progress bar."""
-    import time
-
-    progress = st.progress(0.0, text="Running...")
-    results: list[dict[str, Any]] = []
-    for index, attack in enumerate(selected, start=1):
+    agent = build_agent(ctx, AUDIT, model=body.model)
+    results = []
+    for attack in selected:
         prompt = prompt_for(attack, ctx)
         if prompt is None:
-            continue  # an indirect attack with no injected note in this tenant
+            # An indirect attack needs an injected note in this tenant's data.
+            results.append(
+                {
+                    "id": attack.id, "category": attack.category, "prompt": attack.prompt,
+                    "intent": attack.intent, "contained": True, "exercised": False,
+                    "not_exercised": f"not applicable: no note in {ctx.tenant_id} carries "
+                    "injected text",
+                    "evidence": "not run", "seconds": 0.0, "answer": None,
+                }
+            )
+            continue
         started = time.perf_counter()
-        answer = _ask(prompt, ctx, model)
+        answer = ask(prompt, ctx, AUDIT, model=body.model, agent=agent)
         contained, evidence = verdict(answer, ctx)
         results.append(
             {
-                "attack": attack,
+                "id": attack.id,
+                "category": attack.category,
                 "prompt": prompt,
-                "answer": answer,
+                "intent": attack.intent,
                 "contained": contained,
                 "exercised": exercised(answer, attack),
+                "not_exercised": not_exercised_reason(answer, attack),
                 "evidence": evidence,
-                "seconds": time.perf_counter() - started,
+                "seconds": round(time.perf_counter() - started, 1),
+                "answer": _answer_payload(answer, ctx),
             }
         )
-        progress.progress(index / len(selected), text=f"{index}/{len(selected)} {attack.id}")
-    progress.empty()
-    return results
+    return {
+        "results": results,
+        "leaked": sum(1 for r in results if not r["contained"]),
+        "exercised": sum(1 for r in results if r["exercised"]),
+        "total": len(results),
+        "model": body.model,
+        "tenant": ctx.tenant_id,
+        "username": ctx.username,
+    }
 
 
-def _render_results(results: list[dict[str, Any]]) -> None:
-    """Show the leak rate and, for each attack, the verdict and what the agent did."""
-    leaked = sum(1 for r in results if not r["contained"])
-    tested = sum(1 for r in results if r["exercised"])
-    total_seconds = sum(r["seconds"] for r in results)
-    (st.success if leaked == 0 else st.error)(
-        f"**Leak rate {leaked}/{len(results)}** · isolation layers exercised in "
-        f"{tested}/{len(results)} — {total_seconds:.0f}s."
-    )
-    if tested < len(results):
-        st.caption(
-            f"{len(results) - tested} attack(s) never reached what they test: the model "
-            "declined without calling a tool, or (for indirect attacks) no injected text "
-            "reached it. Those are contained by the model, not demonstrated by the layers."
-        )
-    st.caption(
-        "The leak rate measures isolation, not answer quality: a contained attack can "
-        "still get a wrong or invented answer. Accuracy is measured separately by the "
-        "golden question set (`python -m evals`)."
-    )
-    for record in results:
-        attack: Attack = record["attack"]
-        with st.container(border=True):
-            st.markdown(
-                f"{'🟢' if record['contained'] else '🔴'} **{attack.id}** · "
-                f"`{attack.category}` · {record['seconds']:.1f}s"
-                f"{'' if record['exercised'] else ' · ⚪ not exercised'}  \n"
-                f"_{attack.intent}_"
-            )
-            st.caption(f"> {record['prompt']}")
-            st.caption(f"verdict: {record['evidence']}")
-            with st.expander("what the agent did"):
-                st.write(record["answer"].text)
-                render_grounding(record["answer"])
-                render_data(record["answer"])
-                render_trace(record["answer"])
+@app.get("/api/audit")
+def audit(secure_rls_session: Session = None) -> list[dict[str, Any]]:
+    """Return the latest audit records, only for the signed-in user's tenant."""
+    ctx = _context_from_cookie(secure_rls_session)
+    return [
+        {
+            "time": record.clock,
+            "user": record.username,
+            "event": record.event,
+            "verdict": record.verdict,
+            "layer": record.layer,
+            "rows": record.rows,
+            "detail": record.detail,
+            "sql": record.sql,
+        }
+        for record in AUDIT.recent(limit=200, tenant_id=ctx.tenant_id)
+    ]
 
 
-def _attack_catalogue() -> None:
-    """Show the list of attacks before any have been run."""
-    st.dataframe(
-        [
-            {"id": a.id, "category": a.category, "intent": a.intent, "prompt": a.prompt}
-            for a in ATTACKS
-        ],
-        use_container_width=True,
-        height=420,
-    )
-
-
-def side_by_side_tab(ctx: SecurityContext, model: str) -> None:
-    """Side by side view: sign in a second account from another tenant, ask both one question."""
-    st.markdown(
-        "The same question, asked as two different users. Nothing about the "
-        "question changes -- only who is asking."
-    )
-    # This tab used to build the second tenant's context itself from a tenant
-    # picked in a dropdown, and show that tenant's rows to whoever was signed
-    # in. Every layer held and the data leaked anyway. The second side is now a
-    # real sign-in with that account's own password, kept in this session only.
-    peer: SecurityContext | None = st.session_state.get("peer_ctx")
-    if peer is not None and peer.tenant_id == ctx.tenant_id:
-        st.session_state.pop("peer_ctx")
-        peer = None
-
-    if peer is None:
-        st.caption(
-            "Sign in a second account from another tenant. Its answers are shown "
-            "only because you signed in as it."
-        )
-        with st.form("peer_sign_in"):
-            username = st.text_input("Second account username")
-            password = st.text_input("Password", type="password")
-            submitted = st.form_submit_button("Sign in second account")
-        if submitted:
-            candidate = authenticate(username, password)
-            if candidate is None:
-                st.error("Incorrect username or password.")
-            elif candidate.tenant_id == ctx.tenant_id:
-                st.error("The second account must belong to a different tenant.")
-            else:
-                st.session_state["peer_ctx"] = candidate
-                st.rerun()
-        return
-
-    info, action = st.columns([4, 1])
-    info.caption(f"Comparing `{ctx.tenant_id}` with `{peer.tenant_id}` — {peer.username}")
-    if action.button(f"Sign out {peer.username}"):
-        st.session_state.pop("peer_ctx")
-        st.rerun()
-
-    question = st.text_input(
-        "Question", value="What is the average salary by department?"
-    )
-    if not st.button("Ask both", use_container_width=True):
-        return
-
-    left, right = st.columns(2)
-    for column, who in ((left, ctx), (right, peer)):
-        with column:
-            st.markdown(f"#### `{who.tenant_id}` — {who.username}")
-            with st.spinner("Thinking..."):
-                answer = _ask(question, who, model)
-            st.write(answer.text)
-            render_grounding(answer)
-            render_data(answer)
-            render_trace(answer)
-
-
-def audit_tab(ctx: SecurityContext) -> None:
-    """The Audit view: recent security decisions for this tenant only."""
-    st.markdown(
-        "Every security decision is written down. This view is itself "
-        "tenant-scoped: you are looking at your own tenant's activity only."
-    )
-    records = _audit_log().recent(limit=200, tenant_id=ctx.tenant_id)
-    if not records:
-        st.info("Nothing recorded yet. Ask a question first.")
-        return
-    st.dataframe(
-        [
-            {
-                "time": r.clock,
-                "user": r.username,
-                "event": r.event,
-                "verdict": r.verdict,
-                "layer": r.layer or "",
-                "rows": r.rows if r.rows is not None else "",
-                "detail": r.detail,
-                "sql": (r.sql or "").replace("\n", " ")[:120],
-            }
-            for r in records
-        ],
-        use_container_width=True,
-        height=480,
-    )
+def _check_model(tag: str) -> None:
+    """Refuse the request if the model name is not one of the configured models."""
+    if tag not in MODELS:
+        raise HTTPException(status_code=400, detail=f"unknown model {tag!r}")
 
 
 # ---------------------------------------------------------------------------
-# Entry point
+# The built front end, when there is one
 # ---------------------------------------------------------------------------
 
+if STATIC_DIR.is_dir():
+    app.mount("/assets", StaticFiles(directory=STATIC_DIR / "assets"), name="assets")
 
-#: View name -> the icon shown on its pill.
-#: View name -> the icon shown on its pill.
-VIEWS: dict[str, str] = {
-    "Chat": "💬",
-    "Security": "🛡️",
-    "Side by side": "👥",
-    "Audit": "📋",
-}
-
-
-def sidebar(ctx: SecurityContext) -> str:
-    """Who you are, which model answers, and every conversation so far."""
-    with st.sidebar:
-        tenant_badge(ctx, db.row_count(ctx))
-
-        model = st.selectbox(
-            "Model",
-            list(MODELS),
-            index=list(MODELS).index(DEFAULT_MODEL),
-            help="Swapping the model changes accuracy, not the isolation guarantee.",
-        )
-        spec = MODELS[model]
-        st.caption(f"{spec.origin} · {spec.licence}")
-        st.divider()
-
-        if st.button("＋  New conversation", key="new_chat", use_container_width=True):
-            _start_chat()
-            st.rerun()
-
-        st.caption("Conversations")
-        current = st.session_state.get("current_chat")
-        for chat_id, chat in reversed(list(_chats().items())):
-            active = chat_id == current
-            key = f"chat_active_{chat_id}" if active else f"chat_{chat_id}"
-            if st.button(chat["title"], key=key, use_container_width=True):
-                st.session_state["current_chat"] = chat_id
-                st.rerun()
-
-        # Pushed to the floor by CSS rather than by a spacer, so the
-        # conversation list takes whatever room is left instead of the layout
-        # depending on how many conversations happen to exist.
-        with st.container(key="signout"):
-            if st.button("Sign out", use_container_width=True):
-                st.session_state.clear()
-                st.rerun()
-    return model
-
-
-def main() -> None:
-    """Entry point of the Streamlit app: sign-in screen, or the sidebar and the selected view."""
-    _database()
-    st.markdown(STYLE, unsafe_allow_html=True)
-
-    ctx: SecurityContext | None = st.session_state.get("ctx")
-    if ctx is None:
-        login_screen()
-        return
-
-    _current_chat()  # make sure one exists before the sidebar lists them
-    model = sidebar(ctx)
-
-    # One view at a time rather than st.tabs: tabs render every panel, and a
-    # chat_input inside one of them is no longer a top-level element, so
-    # Streamlit stops pinning it to the bottom of the window.
-    with st.container(key="navbar"):
-        view = (
-            st.segmented_control(
-                "view",
-                list(VIEWS),
-                default="Chat",
-                format_func=lambda name: f"{VIEWS[name]} {name}",
-                label_visibility="collapsed",
-                key="view_nav",
-            )
-            or "Chat"
-        )
-
-    if view == "Chat":
-        question = st.chat_input(f"Ask about {ctx.tenant_id}'s employees")
-        chat_view(ctx, model, question or st.session_state.pop("pending", None))
-    elif view == "Security":
-        security_tab(ctx, model)
-    elif view == "Side by side":
-        side_by_side_tab(ctx, model)
-    else:
-        audit_tab(ctx)
-
-
-main()
+    @app.get("/{path:path}")
+    def spa(path: str) -> FileResponse:
+        """Serve the single-page app for anything that is not an API route."""
+        candidate = STATIC_DIR / path
+        if path and candidate.is_file():
+            return FileResponse(candidate)
+        return FileResponse(STATIC_DIR / "index.html")

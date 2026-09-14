@@ -13,7 +13,7 @@ from types import SimpleNamespace
 import pytest
 from fastapi.testclient import TestClient
 
-import api
+import app as server
 from secure_rls.security.context import SecurityContext
 
 
@@ -22,7 +22,7 @@ def client() -> Iterator[TestClient]:
     # Used as a context manager so the app's startup hook runs and loads the
     # database. Without it these tests passed only on machines that already had
     # secure_rls.db lying around, and failed on a clean CI checkout.
-    with TestClient(api.app) as test_client:
+    with TestClient(server.app) as test_client:
         yield test_client
 
 
@@ -47,10 +47,10 @@ def asked(monkeypatch: pytest.MonkeyPatch) -> list[SecurityContext]:
         )
         return SimpleNamespace(
             text=f"answer for {ctx.tenant_id}", steps=[step], charts=[], flags=[],
-            retried=False, ungrounded=(), claimed_tenants=(),
+            retried=False, ungrounded=(), claimed_tenants=(), selected_rows=(), ignored_refs=(),
         )
 
-    monkeypatch.setattr(api, "ask", fake_ask)
+    monkeypatch.setattr(server, "ask", fake_ask)
     return seen
 
 
@@ -103,13 +103,13 @@ def test_a_forged_cookie_is_refused(client: TestClient) -> None:
     This is the whole of the API's L1 claim. If a hand-made cookie were
     accepted, every layer below it would be defending the wrong tenant.
     """
-    client.cookies.set(api.COOKIE, "ImJvYiI.not-a-real-signature")
+    client.cookies.set(server.COOKIE, "ImJvYiI.not-a-real-signature")
     assert client.get("/api/session").status_code == 401
 
 
 def test_a_tampered_signature_is_refused(client: TestClient) -> None:
     sign_in(client)
-    raw = client.cookies[api.COOKIE]
+    raw = client.cookies[server.COOKIE]
     body, _, signature = raw.rpartition(".")
     flipped = ("a" if signature[0] != "a" else "b") + signature[1:]
     # Clear first. set() adds a second cookie beside the server's (which is
@@ -117,7 +117,7 @@ def test_a_tampered_signature_is_refused(client: TestClient) -> None:
     # sent depends on jar ordering: on Python 3.10 the valid one went first and
     # this test passed without ever presenting the tampered signature.
     client.cookies.clear()
-    client.cookies.set(api.COOKIE, f"{body}.{flipped}")
+    client.cookies.set(server.COOKIE, f"{body}.{flipped}")
     assert list(client.cookies.jar) and all(
         cookie.value.endswith(flipped) for cookie in client.cookies.jar
     )
@@ -185,7 +185,7 @@ def test_the_second_account_needs_its_own_password(client: TestClient) -> None:
     sign_in(client)
     response = client.post("/api/compare/peer", json={"username": "bob", "password": "wrong"})
     assert response.status_code == 401
-    assert api.PEER_COOKIE not in response.cookies
+    assert server.PEER_COOKIE not in response.cookies
 
 
 def test_the_second_account_must_be_another_tenant(client: TestClient) -> None:
@@ -218,15 +218,15 @@ def test_a_main_session_cookie_is_not_accepted_as_the_second_account(
     not work as the peer cookie: otherwise the peer sign-in would be one
     copy-paste away from being skipped.
     """
-    with TestClient(api.app) as bob_client:
+    with TestClient(server.app) as bob_client:
         sign_in(bob_client, "bob", "beta-demo-2026")
-        bob_token = bob_client.cookies[api.COOKIE]
+        bob_token = bob_client.cookies[server.COOKIE]
 
     sign_in(client)
-    alice_token = client.cookies[api.COOKIE]
+    alice_token = client.cookies[server.COOKIE]
     client.cookies.clear()
-    client.cookies.set(api.COOKIE, alice_token)
-    client.cookies.set(api.PEER_COOKIE, bob_token)
+    client.cookies.set(server.COOKIE, alice_token)
+    client.cookies.set(server.PEER_COOKIE, bob_token)
 
     response = client.post("/api/compare", json={"question": "top earners"})
     assert response.status_code == 401

@@ -413,7 +413,7 @@ secure_rls/
   grounding.py    checks that figures in an answer came from a tool
 evals/            golden questions, attack runner, model benchmark
 tests/            390 tests; none needs a model
-docs/             threat model, evaluation method, benchmark, demo script
+docs/             threat model, evaluation method, benchmark, model choice
 .claude/          project rules, a security-review subagent, two commands, a hook
 ```
 

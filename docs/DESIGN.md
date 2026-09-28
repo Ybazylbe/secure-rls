@@ -50,14 +50,25 @@ a resolved value executed would make the trace describe a different statement.
 ## Column-level masking for a role
 
 Accounts with the `viewer` role (`arthur`) get `salary` and `notes` back as
-`NULL` on every row, enforced in the view itself (`VIEWER_MASKED_COLUMNS` in
-[`db.py`](../db.py)), not by a tool declining to display a column or a prompt
+`NULL` on every row, enforced in the view itself (the view is built in
+[`db.py`](../db.py) from `ROLE_MASKED_COLUMNS` in
+[`context.py`](../secure_rls/security/context.py)), not by a tool declining to display a column or a prompt
 asking the model not to mention one. Because the view's `SELECT` list never
 names a masked column for that role, the authorizer never sees a read of
 `employees_all.salary` on a viewer's connection — the value is not withheld
 after being fetched, it is never fetched. The note index is cached per
 `(tenant, role)` for the same reason, so a viewer is never served an analyst's
 index of real note text.
+
+Roles are a closed set, like tenants: `SecurityContext` refuses any other
+value, and the view raises rather than build for a role it does not know.
+Masking was once decided by `role == "viewer"`, so a typo such as `Viewer` fell
+through to the full view — a mistake that widened access instead of refusing.
+
+Masking hides the value, but on its own it made for wrong answers: a viewer's
+salary sum came back as 0, the average as NaN, and the maximum crashed the tool.
+Every tool and the SQL guard now refuse a masked column with the same reason —
+"your role (viewer) cannot see salary" — which the model passes on.
 
 This is one demonstration, not a role system — there is no per-department or
 per-row scoping. It shows that a view is a natural place to encode "who may see

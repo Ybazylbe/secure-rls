@@ -21,7 +21,12 @@ from db import DEFAULT_DB_PATH, tenant_frame
 from secure_rls.security.audit import AuditLog
 from secure_rls.security.context import SecurityContext
 from secure_rls.tools.base import ToolResult
-from secure_rls.tools.frames import ColumnError, check_groupable, check_numeric
+from secure_rls.tools.frames import (
+    ColumnError,
+    check_groupable,
+    check_numeric,
+    check_visible,
+)
 
 ChartType = Literal["bar", "histogram", "box"]
 
@@ -38,6 +43,7 @@ def plot(
     """Build a chart spec over the caller's employees."""
     try:
         check_numeric(column)
+        check_visible(ctx, [column])
         if chart_type not in ("bar", "histogram", "box"):
             raise ColumnError(f"unknown chart type {chart_type!r}")
         if chart_type in ("bar", "box"):

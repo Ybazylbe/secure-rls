@@ -107,6 +107,7 @@ def guard(sql: str, ctx: SecurityContext, *, max_rows: int = MAX_ROWS) -> Guarde
     _check_functions(statement, sql)
     _check_columns(statement, sql)
     _reject_foreign_tenant_filters(statement, ctx, sql)
+    _reject_masked_columns(statement, ctx, sql)
 
     rewrites: list[str] = []
     _strip_comments(statement)
@@ -341,6 +342,34 @@ def _reject_foreign_tenant_filters(
             f"the tenant filter; {ctx.tenant_id}'s is applied automatically.",
             sql=sql,
         )
+
+
+def _reject_masked_columns(
+    statement: exp.Expression, ctx: SecurityContext, sql: str
+) -> None:
+    """Refuse a query that names a column the caller's role sees as NULL.
+
+    In plain terms: the view already turns a viewer's salaries into NULL, so
+    nothing leaks either way. Left to run, ``SELECT AVG(salary)`` came back as
+    NULL and ``SUM(salary)`` as nothing at all, and the model is free to report
+    either as "average salary: 0". Refusing with a reason says what is true.
+
+    Like the foreign-tenant refusal above, this is about not being misread,
+    not about protection: the view is what hides the value. A rename through a
+    CTE column list does not get round it, because _check_columns already
+    refuses the new name. ``SELECT *`` is allowed -- the other columns are
+    real, and the masked ones show as NULL.
+    """
+    masked = ctx.masked_columns
+    if not masked:
+        return
+    named = {
+        column.name.lower()
+        for column in statement.find_all(exp.Column)
+        if column.name.lower() in masked
+    }
+    if named:
+        raise SqlGuardError(ctx.masked_reason(named), sql=sql)
 
 
 def _is_tenant_column(node: exp.Expression | None) -> bool:

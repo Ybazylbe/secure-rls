@@ -24,8 +24,8 @@ from __future__ import annotations
 import os
 import secrets
 import time
-from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from collections.abc import AsyncIterator, Iterator
+from contextlib import asynccontextmanager, contextmanager
 from pathlib import Path
 from typing import Annotated, Any
 
@@ -33,6 +33,7 @@ from fastapi import Cookie, FastAPI, HTTPException, Response
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from itsdangerous import BadSignature, URLSafeTimedSerializer
+from ollama import ResponseError as OllamaResponseError
 from pydantic import BaseModel, ConfigDict, Field
 
 import db
@@ -88,6 +89,31 @@ async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
 
 
 app = FastAPI(title="Secure RLS Analyst", docs_url="/api/docs", lifespan=_lifespan)
+
+
+@contextmanager
+def _model_errors() -> Iterator[None]:
+    """Turn "Ollama is down" and "model not pulled" into a 503 that says so.
+
+    A first run without Ollama, or without the chosen model pulled, used to end
+    in a bare 500 with nothing on screen to say which. Scoped to the model call
+    rather than registered app-wide, so an unrelated ConnectionError elsewhere
+    is not reported as Ollama's.
+    """
+    try:
+        yield
+    except OllamaResponseError as err:
+        if err.status_code == 404:
+            detail = f"{err.error}. Pull it with `ollama pull <model>`, or pick another model."
+        else:
+            detail = f"Ollama returned an error: {err.error}"
+        raise HTTPException(status_code=503, detail=detail) from err
+    except ConnectionError as err:
+        raise HTTPException(
+            status_code=503,
+            detail="cannot reach Ollama. Start it with `ollama serve`, or set OLLAMA_HOST "
+            "to where it runs and restart the app.",
+        ) from err
 
 
 # ---------------------------------------------------------------------------
@@ -314,7 +340,8 @@ def ask_question(body: AskRequest, secure_rls_session: Session = None) -> dict[s
     ctx = _context_from_cookie(secure_rls_session)
     _check_model(body.model)
     history = [(turn.question, turn.answer) for turn in body.history]
-    answer = ask(body.question, ctx, AUDIT, model=body.model, history=history)
+    with _model_errors():
+        answer = ask(body.question, ctx, AUDIT, model=body.model, history=history)
     return _answer_payload(answer, ctx)
 
 
@@ -375,8 +402,9 @@ def compare(
     ctx = _context_from_cookie(secure_rls_session)
     peer = _peer_context(secure_rls_session, secure_rls_peer)
     _check_model(body.model)
-    mine = _answer_payload(ask(body.question, ctx, AUDIT, model=body.model), ctx)
-    theirs = _answer_payload(ask(body.question, peer, AUDIT, model=body.model), peer)
+    with _model_errors():
+        mine = _answer_payload(ask(body.question, ctx, AUDIT, model=body.model), ctx)
+        theirs = _answer_payload(ask(body.question, peer, AUDIT, model=body.model), peer)
     return {
         "mine": {"tenant": ctx.tenant_id, **mine},
         "theirs": {"tenant": peer.tenant_id, **theirs},
@@ -437,7 +465,8 @@ def run_attacks(body: AttackRequest, secure_rls_session: Session = None) -> dict
             )
             continue
         started = time.perf_counter()
-        answer = ask(prompt, ctx, AUDIT, model=body.model, agent=agent)
+        with _model_errors():
+            answer = ask(prompt, ctx, AUDIT, model=body.model, agent=agent)
         contained, evidence = verdict(answer, ctx)
         results.append(
             {

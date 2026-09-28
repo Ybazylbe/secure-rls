@@ -12,6 +12,7 @@ from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
+from ollama import ResponseError as OllamaResponseError
 
 import app as server
 from secure_rls.security.context import SecurityContext
@@ -310,3 +311,29 @@ def test_an_unknown_model_is_refused(client: TestClient) -> None:
     sign_in(client)
     response = client.post("/api/ask", json={"question": "hi", "model": "gpt-nonsense"})
     assert response.status_code == 400
+
+
+@pytest.mark.parametrize(
+    ("failure", "expected"),
+    [
+        (ConnectionError("Failed to connect to Ollama"), "OLLAMA_HOST"),
+        (
+            OllamaResponseError("model 'mistral-nemo:12b' not found", status_code=404),
+            "ollama pull",
+        ),
+    ],
+    ids=["ollama-down", "model-not-pulled"],
+)
+def test_a_missing_model_or_ollama_is_explained_not_a_bare_500(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, failure: Exception, expected: str
+) -> None:
+    """A first run without Ollama, or without the model pulled, once ended in a bare 500."""
+
+    def failing_ask(*args: object, **kwargs: object) -> object:
+        raise failure
+
+    monkeypatch.setattr(server, "ask", failing_ask)
+    sign_in(client)
+    response = client.post("/api/ask", json={"question": "how many employees?"})
+    assert response.status_code == 503
+    assert expected in response.json()["detail"]

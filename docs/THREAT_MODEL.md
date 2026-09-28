@@ -99,7 +99,7 @@ Named because an unstated exclusion is indistinguishable from an oversight.
    context. A cached tool bound to the wrong context would defeat L1; the UI
    caches on the tenant as part of the key.
 5. The per-tenant view's column list depends on `ctx.role` (see
-   `db.VIEWER_MASKED_COLUMNS`), and the note index is cached per `(tenant,
+   `ROLE_MASKED_COLUMNS` in `context.py`), and the note index is cached per `(tenant,
    role)` rather than per tenant for the same reason: a cache keyed on less
    than everything the content depends on serves the wrong thing to someone.
 

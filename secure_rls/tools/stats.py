@@ -32,7 +32,12 @@ from db import DEFAULT_DB_PATH, tenant_frame
 from secure_rls.security.audit import AuditLog
 from secure_rls.security.context import SecurityContext
 from secure_rls.tools.base import ToolResult
-from secure_rls.tools.frames import ColumnError, check_groupable, check_numeric
+from secure_rls.tools.frames import (
+    ColumnError,
+    check_groupable,
+    check_numeric,
+    check_visible,
+)
 
 if TYPE_CHECKING:
     import pandas as pd
@@ -241,6 +246,7 @@ def aggregate(
             raise ColumnError(f"{metric!r} needs a column: salary or performance_score")
         if column is not None:
             check_numeric(column)
+        check_visible(ctx, [column, *(p.column for p in filters.predicates)])
     except ColumnError as err:
         audit.record(ctx, "stats", "refused", detail=str(err), layer="tool")
         return ToolResult(summary="", refused=True, reason=str(err))

@@ -13,7 +13,10 @@ something else. Everything below is checked against these sets first.
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from typing import Final
+
+from secure_rls.security.context import SecurityContext
 
 NUMERIC_COLUMNS: Final[frozenset[str]] = frozenset({"salary", "performance_score"})
 CATEGORICAL_COLUMNS: Final[frozenset[str]] = frozenset({"department", "name", "hire_date"})
@@ -42,3 +45,16 @@ def check_groupable(column: str) -> str:
             f"{sorted(GROUPABLE_COLUMNS)}"
         )
     return column
+
+
+def check_visible(ctx: SecurityContext, columns: Iterable[str | None]) -> None:
+    """Raise ColumnError if the caller's role sees any of ``columns`` as NULL.
+
+    The view returns NULL for a masked column, and pandas turns a column of
+    NULLs into a sum of 0, a mean of NaN, or an exception on max -- each
+    reported by a model as if it were a figure. Refusing up front gives one
+    clear reason instead.
+    """
+    masked = {c for c in columns if c is not None and c in ctx.masked_columns}
+    if masked:
+        raise ColumnError(ctx.masked_reason(masked))

@@ -7,19 +7,23 @@ testing the functions directly keeps the security assertions deterministic.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
+from db import TENANT_VIEW, tenant_connection
 from secure_rls.rag import get_index, reset_indexes
 from secure_rls.security.audit import AuditLog
 from secure_rls.security.context import SecurityContext
 from secure_rls.tools import build_tools, tool_names
 from secure_rls.tools.anomaly import detect_anomalies
+from secure_rls.tools.base import ToolResult
 from secure_rls.tools.plot import plot
 from secure_rls.tools.query import run_sql
-from secure_rls.tools.stats import aggregate
+from secure_rls.tools.search import search_notes
+from secure_rls.tools.stats import Filters, aggregate
 
 
 @pytest.fixture
@@ -103,13 +107,71 @@ def test_an_analyst_is_not_affected_by_the_viewer_mask(
 
 
 def test_a_viewer_cannot_recover_a_masked_column_by_naming_it_differently(
+    db_path: Path,
+) -> None:
+    """Masking happens in the view SQLite hands back, not by inspecting the model's query.
+
+    Run on the connection directly, below the guard: the guard now refuses
+    these queries by name (see test_sql_guard), and the point here is that the
+    view would return NULL even if it did not.
+    """
+    ctx = ctx_for("acme", role="viewer")
+    for sql in (
+        f"SELECT salary FROM {TENANT_VIEW}",
+        f"SELECT salary AS pay FROM {TENANT_VIEW} LIMIT 1",
+        f"SELECT MAX(salary), SUM(salary), MAX(notes) FROM {TENANT_VIEW}",
+    ):
+        with tenant_connection(ctx, db_path) as con:
+            rows = con.execute(sql).fetchall()
+        assert rows, sql
+        assert all(v is None for row in rows for v in tuple(row)), sql
+
+
+def test_a_viewer_asking_the_sql_tool_for_salary_is_told_why(
     db_path: Path, audit: AuditLog
 ) -> None:
-    """Masking happens in the view SQLite hands back, not by inspecting the model's query."""
-    for sql in ("SELECT salary FROM employees", "SELECT salary AS pay FROM employees LIMIT 1"):
-        result = run_sql(sql, ctx_for("acme", role="viewer"), audit, db_path)
-        assert not result.refused, sql
-        assert all(v is None for row in result.rows for v in row.values()), sql
+    result = run_sql("SELECT AVG(salary) FROM employees", ctx_for("acme", "viewer"), audit, db_path)
+    assert result.refused
+    assert "cannot see salary" in (result.reason or "")
+
+
+@pytest.mark.parametrize(
+    "call",
+    [
+        lambda c, a, p: aggregate("sum", "salary", c, a, db_path=p),
+        lambda c, a, p: aggregate("avg", "salary", c, a, group_by="department", db_path=p),
+        lambda c, a, p: aggregate("max", "salary", c, a, db_path=p),
+        lambda c, a, p: aggregate(
+            "count", None, c, a, filters=Filters.build(min_salary=100_000), db_path=p
+        ),
+        lambda c, a, p: plot("histogram", "salary", c, a, db_path=p),
+        lambda c, a, p: detect_anomalies("salary", c, a, db_path=p),
+        lambda c, a, p: search_notes("administrator", c, a, db_path=p),
+    ],
+    ids=["sum", "avg-by-dept", "max", "count-filtered", "plot", "anomalies", "search"],
+)
+def test_every_tool_refuses_a_masked_column_with_a_reason(
+    call: Callable[[SecurityContext, AuditLog, Path], ToolResult],
+    db_path: Path,
+    audit: AuditLog,
+) -> None:
+    """A viewer's salary sum came back as 0, the mean as NaN, and max crashed.
+
+    None of those leaked -- the view held -- but each was a wrong answer the
+    model could report as a figure. Every tool must say the role cannot see it.
+    """
+    result = call(ctx_for("acme", role="viewer"), audit, db_path)
+    assert result.refused
+    assert "role (viewer) cannot see" in (result.reason or "")
+
+
+def test_a_viewer_still_gets_figures_from_columns_it_can_see(
+    db_path: Path, audit: AuditLog
+) -> None:
+    ctx = ctx_for("acme", "viewer")
+    result = aggregate("avg", "performance_score", ctx, audit, db_path=db_path)
+    assert not result.refused
+    assert result.rows[0]["avg_performance_score"] > 0
 
 
 def test_sql_tool_reports_a_refusal_instead_of_raising(db_path: Path, audit: AuditLog) -> None:

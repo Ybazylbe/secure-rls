@@ -13,7 +13,7 @@ from pathlib import Path
 import pytest
 
 from db import BASE_TABLE, TENANT_VIEW, admin_connection, row_count, tenant_connection
-from secure_rls.security.context import TENANTS, SecurityContext, TenantError
+from secure_rls.security.context import TENANTS, RoleError, SecurityContext, TenantError
 
 
 def ctx_for(tenant: str) -> SecurityContext:
@@ -152,3 +152,27 @@ def test_unknown_tenants_are_refused_at_construction(bad_tenant: str) -> None:
     """The tenant id reaches SQL as a literal, so the allowlist is load-bearing."""
     with pytest.raises(TenantError):
         SecurityContext(user_id=1, username="mallory", tenant_id=bad_tenant)
+
+
+@pytest.mark.parametrize("bad_role", ["Viewer", "VIEWER", "viewer ", "admin", "", "superuser"])
+def test_unknown_roles_are_refused_at_construction(bad_role: str) -> None:
+    """A role outside the closed set must not fall through to the unmasked view.
+
+    Masking was once decided by ``role == "viewer"``, so "Viewer" or "admin"
+    got the analyst's full salary and notes columns: a mistake in the role
+    widened access instead of refusing it.
+    """
+    with pytest.raises(RoleError):
+        SecurityContext(user_id=1, username="mallory", tenant_id="acme", role=bad_role)
+
+
+def test_the_view_fails_closed_on_a_role_that_bypassed_construction(db_path: Path) -> None:
+    """L2 must not depend on L1 having validated the role.
+
+    A context forged past ``__post_init__`` with an unknown role gets no
+    connection at all, rather than one whose view masks nothing.
+    """
+    forged = SecurityContext(user_id=1, username="mallory", tenant_id="acme", role="viewer")
+    object.__setattr__(forged, "role", "Viewer")
+    with pytest.raises(KeyError, match="Viewer"), tenant_connection(forged, db_path) as con:
+        con.execute(f"SELECT salary FROM {TENANT_VIEW}").fetchone()

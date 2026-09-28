@@ -38,7 +38,7 @@ if TYPE_CHECKING:
     import pandas as pd
 
 from secure_rls.security.authorizer import make_authorizer
-from secure_rls.security.context import SecurityContext
+from secure_rls.security.context import ROLE_MASKED_COLUMNS, SecurityContext
 
 BASE_TABLE: Final = "employees_all"
 TENANT_VIEW: Final = "employees"
@@ -53,28 +53,28 @@ COLUMNS: Final[tuple[str, ...]] = (
     "performance_score", "hire_date", "notes",
 )
 
-#: The account role masked below. `SecurityContext.role` is free text at the
-#: type level, but only two values are ever issued -- see secure_rls/auth.py.
-VIEWER_ROLE: Final = "viewer"
-
-#: Columns replaced with NULL for a viewer account, enforced in the view
-#: itself rather than filtered by a tool, checked by the guard, or asked of
-#: the prompt. The tenant boundary answers "row-level security" only at the
-#: tenant's grain; a role that should see fewer *columns* of its own tenant's
-#: rows is the next grain down, and this is the smallest real demonstration
-#: that the view can enforce that too, the same way it enforces the tenant
-#: filter -- physically, before any SQL runs.
+#: Column-level masking, per role, enforced in the view itself rather than
+#: filtered by a tool, checked by the guard, or asked of the prompt. The tenant
+#: boundary answers "row-level security" only at the tenant's grain; a role
+#: that should see fewer *columns* of its own tenant's rows is the next grain
+#: down, and `viewer` (salary and notes masked) is the smallest real
+#: demonstration that the view can enforce that too -- physically, before any
+#: SQL runs. The policy lives in ROLE_MASKED_COLUMNS in context.py.
 #:
-#: Because the view's SELECT list never names these columns for a masked
-#: role, the SQLite authorizer never sees a READ of employees_all.salary or
-#: .notes on that connection at all: the value is not merely withheld after
-#: being fetched, it is never fetched.
-VIEWER_MASKED_COLUMNS: Final[frozenset[str]] = frozenset({"salary", "notes"})
+#: Because the view's SELECT list never names a masked column for that role,
+#: the SQLite authorizer never sees a READ of employees_all.salary or .notes on
+#: that connection at all: the value is not merely withheld after being
+#: fetched, it is never fetched.
 
 
 def _masked_columns(role: str) -> frozenset[str]:
-    """Which of :data:`COLUMNS` are replaced with NULL for this role."""
-    return VIEWER_MASKED_COLUMNS if role == VIEWER_ROLE else frozenset()
+    """Which of :data:`COLUMNS` are replaced with NULL for this role.
+
+    A lookup, not a comparison with one role name: an unknown role raises
+    KeyError instead of falling through to an unmasked view. SecurityContext
+    already refuses unknown roles; this makes the view fail closed on its own.
+    """
+    return ROLE_MASKED_COLUMNS[role]
 
 
 def _view_select_list(role: str) -> str:
@@ -226,8 +226,8 @@ def tenant_connection(
     construction time, so no attacker-controlled string reaches this SQL.
 
     The view's column list also depends on ``ctx.role``: see
-    :data:`VIEWER_MASKED_COLUMNS`. Masking here, rather than in a tool or the
-    prompt, means it holds for every statement this connection ever runs, not
+    :data:`secure_rls.security.context.ROLE_MASKED_COLUMNS`. Masking here, rather
+    than in a tool or the prompt, means it holds for every statement this connection ever runs, not
     just the ones a particular tool happened to check.
 
     ``query_timeout`` bounds how long any one statement on this connection may

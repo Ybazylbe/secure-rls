@@ -44,6 +44,12 @@ def search_notes(
     if not query.strip():
         audit.record(ctx, "search_notes", "refused", detail="empty query", layer="tool")
         return ToolResult(summary="", refused=True, reason="the search query was empty")
+    if "notes" in ctx.masked_columns:
+        # The index for this role holds a placeholder instead of every note, so
+        # a search would rank placeholders and return people at random.
+        reason = ctx.masked_reason({"notes"})
+        audit.record(ctx, "search_notes", "refused", detail=reason, layer="tool")
+        return ToolResult(summary="", refused=True, reason=reason)
 
     index = get_index(ctx, db_path)
     hits = index.search(query, k=min(k, MAX_RESULTS))

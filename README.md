@@ -8,7 +8,7 @@ prompt-injected or simply wrong model cannot reach another tenant's rows,
 because the database enforces isolation rather than the prompt.
 
 ```
-Leak rate 0/25 on all three models · 92–95% answer accuracy · 100% correct refusals · 390 tests
+Leak rate 0/25 on all three models · 92–95% answer accuracy · 100% correct refusals · 417 tests
 ```
 
 ![architecture](docs/architecture.svg)
@@ -26,6 +26,12 @@ npm --prefix web ci && npm --prefix web run build
 uvicorn app:app --port 8000            # open http://localhost:8000
 ```
 
+The app expects Ollama at `http://127.0.0.1:11434`; if it runs elsewhere, set
+`OLLAMA_HOST` before starting. The model is chosen in the header of the app,
+from the three in [`provider.py`](secure_rls/llm/provider.py) (default
+`mistral-nemo:12b`); pull any other with `ollama pull <name>` before selecting
+it. If Ollama is unreachable or a model is missing, the app says which.
+
 Or run the image CI publishes to `ghcr.io/ybazylbe/secure-rls` with
 `docker compose up -d` (add `--build` to build from this checkout). The image
 contains no model and reaches Ollama at `OLLAMA_HOST`; set `SECURE_RLS_SECRET`
@@ -34,7 +40,7 @@ to keep sessions valid across restarts.
 | user | password | tenant | role |
 | --- | --- | --- | --- |
 | `alice` | `acme-demo-2026` | acme | analyst |
-| `arthur` | `acme-demo-2026` | acme | viewer — `salary` and `notes` masked |
+| `arthur` | `acme-demo-2026` | acme | viewer — `salary` and `notes` masked; asked for them, it says so |
 | `bob` | `beta-demo-2026` | beta | analyst |
 | `gita` | `gamma-demo-2026` | gamma | analyst |
 
@@ -133,8 +139,9 @@ The repository is set up for Claude Code: see [`.claude/`](.claude) and
 
 - **L3 trusts a name.** `WITH employees AS (SELECT * FROM employees_all)` passes
   L3 alone; L4 refuses it. Per-tenant tables or files would remove the dependency.
-- **L5 inspects `tenant_id` only.** The leak verdict has no such gap; the
-  runtime check does.
+- **L5 inspects `tenant_id` only.** A result of names or an average carries no
+  tenant id, so L5 cannot attribute it; L2 and L3 are what hold for those. The
+  leak verdict has no such gap; the runtime check does.
 - **Inference within a tenant is out of scope** — no query-set-size limits or
   differential privacy.
 - **Answers can be wrong without leaking**; only the golden set catches a

@@ -21,7 +21,12 @@ from db import DEFAULT_DB_PATH, tenant_frame
 from secure_rls.security.audit import AuditLog
 from secure_rls.security.context import SecurityContext
 from secure_rls.tools.base import ToolResult
-from secure_rls.tools.frames import ColumnError, check_groupable, check_numeric
+from secure_rls.tools.frames import (
+    ColumnError,
+    check_groupable,
+    check_numeric,
+    check_visible,
+)
 
 Method = Literal["iqr", "zscore"]
 
@@ -38,6 +43,7 @@ def detect_anomalies(
     """Flag values that sit far outside their peer group."""
     try:
         check_numeric(column)
+        check_visible(ctx, [column])
         if group_by:
             check_groupable(group_by)
         if method not in ("iqr", "zscore"):

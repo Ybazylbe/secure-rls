@@ -157,7 +157,7 @@ def _keyword_scores(
 
 
 #: A note's text is replaced with this when the caller's role masks the
-#: `notes` column (see db.VIEWER_MASKED_COLUMNS). Explicit rather than an
+#: `notes` column (see ROLE_MASKED_COLUMNS in context.py). Explicit rather than an
 #: empty string, so a masked result reads as "hidden", not as "this person
 #: wrote nothing".
 _MASKED_NOTE: Final = "[notes masked for this role]"

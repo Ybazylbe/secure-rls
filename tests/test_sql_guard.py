@@ -231,3 +231,43 @@ def test_a_refused_query_is_also_refused_by_the_database(db_path: Path) -> None:
         guard(sql, ctx)
     with tenant_connection(ctx, db_path) as con, pytest.raises(sqlite3.Error):
         con.execute(sql).fetchall()
+
+
+# --------------------------------------------------------------------------
+# A masked column is refused with a reason, not answered with NULL
+# --------------------------------------------------------------------------
+
+
+def viewer(tenant: str = "acme") -> SecurityContext:
+    return SecurityContext(user_id=1, username="arthur", tenant_id=tenant, role="viewer")
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "SELECT AVG(salary) FROM employees",
+        "SELECT SUM(Salary) AS pay FROM employees",
+        "SELECT name FROM employees WHERE salary > 100000",
+        "SELECT name FROM employees ORDER BY employees.salary DESC",
+        "SELECT name FROM employees WHERE notes LIKE '%admin%'",
+        "WITH t AS (SELECT salary AS x FROM employees) SELECT AVG(x) FROM t",
+        "SELECT name /* salary */ FROM employees WHERE \"salary\" > 1",
+    ],
+)
+def test_a_viewer_s_query_naming_a_masked_column_is_refused_with_a_reason(sql: str) -> None:
+    """Otherwise ``AVG(salary)`` runs, returns NULL, and is reported as a figure."""
+    with pytest.raises(SqlGuardError) as err:
+        guard(sql, viewer())
+    assert "role (viewer) cannot see" in err.value.reason
+
+
+def test_a_viewer_can_still_select_everything_else() -> None:
+    for sql in (
+        "SELECT * FROM employees",
+        "SELECT department, AVG(performance_score) FROM employees GROUP BY department",
+    ):
+        guard(sql, viewer())
+
+
+def test_an_analyst_is_not_refused_a_column_a_viewer_cannot_see() -> None:
+    guard("SELECT AVG(salary) FROM employees WHERE notes <> ''", ctx_for("acme"))
